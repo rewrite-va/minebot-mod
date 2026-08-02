@@ -18,10 +18,11 @@ public final class BlockInfo {
     public final boolean physical; // a solid full block you can stand on
     public final boolean liquid;
     public final boolean climbable;
+    public final boolean closedDoor; // a hand-openable door currently blocking this space
 
     public BlockInfo(
         final int x, final int y, final int z, final boolean known, final boolean safe,
-        final boolean physical, final boolean liquid, final boolean climbable
+        final boolean physical, final boolean liquid, final boolean climbable, final boolean closedDoor
     ) {
         this.x = x;
         this.y = y;
@@ -31,6 +32,7 @@ public final class BlockInfo {
         this.physical = physical;
         this.liquid = liquid;
         this.climbable = climbable;
+        this.closedDoor = closedDoor;
     }
 
     public double height() {

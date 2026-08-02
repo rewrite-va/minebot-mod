@@ -4,6 +4,7 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.EmptyBlockGetter;
+import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.ArrayList;
@@ -59,7 +60,7 @@ public final class Movements {
         BlockPos pos = new BlockPos(x, y, z);
 
         if (!level.isLoaded(pos)) {
-            return new BlockInfo(x, y, z, false, false, false, false, false);
+            return new BlockInfo(x, y, z, false, false, false, false, false, false);
         }
 
         BlockState state = level.getBlockState(pos);
@@ -68,14 +69,25 @@ public final class Movements {
         boolean isLadder = state.getBlock().builtInRegistryHolder().is(BlockTags.CLIMBABLE);
         boolean isSolid = state.isCollisionShapeFullBlock(EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
 
+        // A closed door blocks collision like a solid block, but unlike a
+        // real wall we can always open it ourselves -- treat it as passable
+        // in the cost model the same way mineflayer-pathfinder's own
+        // movements.js does not special-case doors at all (its equivalent
+        // mineflayer-pathfinder plugin auto-opens doors on approach, not by
+        // costing them in A*). closedDoor is tracked separately so
+        // MinebotMod's tick loop knows to right-click it open as the bot
+        // walks up to it, rather than needing that logic here.
+        boolean isDoor = state.getBlock() instanceof DoorBlock && DoorBlock.isWoodenDoor(state);
+        boolean closedDoor = isDoor && !state.getValue(DoorBlock.OPEN);
+
         // movements.js: b.safe = (boundingBox === 'empty' || climbable || carpet) && !avoid.
         // Liquids have no collision box in vanilla (you can swim through
         // them), so they count as "empty"/safe too -- confirmed against
         // getLandingBlock's `blockLand.liquid && blockLand.safe` check on
         // the earlier Python port, which would be dead code otherwise.
-        boolean safe = isAir || isLadder || isLiquid;
+        boolean safe = isAir || isLadder || isLiquid || closedDoor;
 
-        return new BlockInfo(x, y, z, true, safe, isSolid, isLiquid, isLadder);
+        return new BlockInfo(x, y, z, true, safe, isSolid, isLiquid, isLadder, closedDoor);
     }
 
     private BlockInfo getBlock(final BlockInfo origin, final int dx, final int dy, final int dz) {

@@ -9,6 +9,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.KeyboardInput;
 import net.minecraft.client.player.LocalPlayer;
+import minebot.mod.pathfinding.DoorOpener;
 import minebot.mod.pathfinding.Move;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
@@ -56,6 +57,7 @@ public final class MinebotMod implements ClientModInitializer {
     // freshly-restarted Python backend to never learn any already-seen
     // player's name (see onControlChannelConnected's docstring).
     private final Set<Integer> knownPlayerIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final DoorOpener doorOpener = new DoorOpener();
     private ControlClient controlClient;
     private float lastReportedHealth = -1;
 
@@ -161,6 +163,7 @@ public final class MinebotMod implements ClientModInitializer {
             level, selfX, selfY, selfZ, target[0], target[1], target[2], controlState.stopDistance
         );
         Move waypoint = controlState.pathTracker.nextWaypoint(selfX, selfY, selfZ);
+        doorOpener.maybeOpenDoorNear(player, level, waypoint);
 
         // Aim at the next unreached waypoint's block center, or the raw
         // target if we have no plan (no path found / not yet computed).

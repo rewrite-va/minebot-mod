@@ -25,29 +25,45 @@ public final class PathTracker {
     // role in mineflayer-pathfinder: avoids recomputing a path every
     // single tick for a target that's barely moved.
     private static final double REPLAN_DISTANCE = 2.0;
+    // If we're farther than this from the waypoint we're supposedly
+    // walking toward, the plan is stale relative to *us*, not just the
+    // target -- e.g. died and respawned elsewhere, got knocked off a
+    // ledge, or teleported. Found live: after a death mid-follow, the bot
+    // kept "detecting" a door on the other side of the map from its actual
+    // (respawned) position forever, since only the target's movement was
+    // ever checked.
+    private static final double SELF_DRIFT_REPLAN_DISTANCE = 4.0;
 
     private final Deque<Move> currentPath = new ArrayDeque<>();
     private double[] pathComputedFor; // {x, y, z}, or null if no path has been computed yet
 
     /**
      * (Re)computes a path toward (targetX, targetY, targetZ) if we don't
-     * have a current one, or the target has moved far enough that the
-     * existing one is stale. Leaves the path empty (not an exception) when
-     * we don't have block data under our own feet yet or no path is
-     * found -- callers should fall back to raw target-following in that
-     * case, same as the Python port, rather than freezing.
+     * have a current one, the target has moved far enough that the
+     * existing one is stale, or we ourselves have drifted too far from
+     * the path we're supposedly following. Leaves the path empty (not an
+     * exception) when we don't have block data under our own feet yet or
+     * no path is found -- callers should fall back to raw target-following
+     * in that case, same as the Python port, rather than freezing.
      */
     public void maybeReplan(
         final ClientLevel level, final double selfX, final double selfY, final double selfZ,
         final double targetX, final double targetY, final double targetZ, final double stopDistance
     ) {
-        if (pathComputedFor != null) {
+        if (pathComputedFor != null && !currentPath.isEmpty()) {
             double dx = pathComputedFor[0] - targetX;
             double dy = pathComputedFor[1] - targetY;
             double dz = pathComputedFor[2] - targetZ;
-            double moved = Math.sqrt(dx * dx + dy * dy + dz * dz);
-            if (moved <= REPLAN_DISTANCE && !currentPath.isEmpty()) {
-                return; // existing path is still aimed close enough to the target
+            double targetMoved = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+            Move nextWaypoint = currentPath.peekFirst();
+            double sdx = nextWaypoint.x - selfX;
+            double sdy = nextWaypoint.y - selfY;
+            double sdz = nextWaypoint.z - selfZ;
+            double selfDrift = Math.sqrt(sdx * sdx + sdy * sdy + sdz * sdz);
+
+            if (targetMoved <= REPLAN_DISTANCE && selfDrift <= SELF_DRIFT_REPLAN_DISTANCE) {
+                return; // existing path is still aimed close enough to the target, and we're still on it
             }
         }
 
@@ -71,9 +87,21 @@ public final class PathTracker {
         AStar astar = new AStar(start, movements::getNeighbors, goal::heuristic, goal::isEnd, PATHFINDING_TIMEOUT_MILLIS);
         AStar.Result result = astar.compute();
 
+        if (result.status() == AStar.Status.SUCCESS && result.path().isEmpty()) {
+            // Not a failure -- the start position already satisfies
+            // GoalNear.isEnd() (we're already within stopDistance), so A*
+            // succeeded trivially with a zero-length path. Leave
+            // currentPath empty; resolveMovementIntent's raw-target
+            // fallback already stops us correctly once close enough.
+            return;
+        }
+
         if ((result.status() == AStar.Status.SUCCESS || result.status() == AStar.Status.PARTIAL) && !result.path().isEmpty()) {
             currentPath.addAll(result.path());
-            MinebotMod.LOGGER.debug("pathfinding: planned path of {} waypoints (status={})", result.path().size(), result.status());
+            MinebotMod.LOGGER.debug(
+                "pathfinding: planned path of {} waypoints (status={}, cost={}): {}",
+                result.path().size(), result.status(), result.cost(), result.path()
+            );
         } else {
             MinebotMod.LOGGER.debug("pathfinding: no path found (status={}), falling back to raw target-following", result.status());
         }
