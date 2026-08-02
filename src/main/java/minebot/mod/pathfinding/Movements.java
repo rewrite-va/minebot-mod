@@ -1,5 +1,6 @@
 package minebot.mod.pathfinding;
 
+import minebot.mod.MinebotMod;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.tags.BlockTags;
@@ -60,34 +61,60 @@ public final class Movements {
         BlockPos pos = new BlockPos(x, y, z);
 
         if (!level.isLoaded(pos)) {
-            return new BlockInfo(x, y, z, false, false, false, false, false, false);
+            return new BlockInfo(x, y, z, false, false, false, false, false, false, false);
         }
 
         BlockState state = level.getBlockState(pos);
         boolean isAir = state.isAir();
         boolean isLiquid = !state.getFluidState().isEmpty();
         boolean isLadder = state.getBlock().builtInRegistryHolder().is(BlockTags.CLIMBABLE);
-        boolean isSolid = state.isCollisionShapeFullBlock(EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
+        boolean isFullBlock = state.isCollisionShapeFullBlock(EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
 
-        // A closed door blocks collision like a solid block, but unlike a
-        // real wall we can always open it ourselves -- treat it as passable
-        // in the cost model the same way mineflayer-pathfinder's own
-        // movements.js does not special-case doors at all (its equivalent
-        // mineflayer-pathfinder plugin auto-opens doors on approach, not by
-        // costing them in A*). closedDoor is tracked separately so
-        // MinebotMod's tick loop knows to right-click it open as the bot
-        // walks up to it, rather than needing that logic here.
+        // Stairs and slabs aren't a full-block collision shape
+        // (isCollisionShapeFullBlock is false for both), but a real player
+        // just walks on top of either exactly like solid ground -- found
+        // live: a cobblestone stairs block sitting directly in front of a
+        // door was classified as neither physical (a floor to stand on)
+        // nor safe (open space to walk through), i.e. as an impassable
+        // wall, forcing a long detour around a single perfectly-walkable
+        // tile. Bottom-half slabs (SlabType.BOTTOM) sit at normal floor
+        // height and are walkable the same way; top-half/double slabs
+        // behave like a full block already (isFullBlock covers double,
+        // and top slabs need +1 step like stairs -- treated the same here
+        // since Movements doesn't yet model the extra half-step height
+        // difference, matching how it already doesn't model partial
+        // step-up costs for stairs either).
+        boolean isStairs = state.getBlock().builtInRegistryHolder().is(BlockTags.STAIRS);
+        boolean isSlab = state.getBlock().builtInRegistryHolder().is(BlockTags.SLABS);
+        boolean isSolid = isFullBlock || isStairs || isSlab;
+
+        // A door -- open or closed -- is never air (state.isAir() is false
+        // either way, it's still a DoorBlock), but an *open* door is just
+        // as walkable as air, and a *closed* one we can always open
+        // ourselves, so both count as passable. Found live: without the
+        // isDoor check here, an already-open door was classified exactly
+        // like a solid wall (not air, not a ladder/liquid, not
+        // closedDoor), so the bot detoured all the way around it instead
+        // of noticing the doorway right in front of it was open.
+        // closedDoor is tracked separately so MinebotMod's tick loop knows
+        // to right-click it open as the bot walks up to it, matching how
+        // mineflayer-pathfinder's own movements.js doesn't special-case
+        // doors in its A* cost model either -- its door-handling plugin
+        // opens them on approach, not by costing them here.
         boolean isDoor = state.getBlock() instanceof DoorBlock && DoorBlock.isWoodenDoor(state);
         boolean closedDoor = isDoor && !state.getValue(DoorBlock.OPEN);
+        if (isDoor) {
+            MinebotMod.LOGGER.debug("pathfinding: door block at {} open={}", pos, !closedDoor);
+        }
 
         // movements.js: b.safe = (boundingBox === 'empty' || climbable || carpet) && !avoid.
         // Liquids have no collision box in vanilla (you can swim through
         // them), so they count as "empty"/safe too -- confirmed against
         // getLandingBlock's `blockLand.liquid && blockLand.safe` check on
         // the earlier Python port, which would be dead code otherwise.
-        boolean safe = isAir || isLadder || isLiquid || closedDoor;
+        boolean safe = isAir || isLadder || isLiquid || isDoor;
 
-        return new BlockInfo(x, y, z, true, safe, isSolid, isLiquid, isLadder, closedDoor);
+        return new BlockInfo(x, y, z, true, safe, isSolid, isLiquid, isLadder, isDoor, closedDoor);
     }
 
     private BlockInfo getBlock(final BlockInfo origin, final int dx, final int dy, final int dz) {

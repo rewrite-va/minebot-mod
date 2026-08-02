@@ -87,6 +87,13 @@ public final class PathTracker {
         AStar astar = new AStar(start, movements::getNeighbors, goal::heuristic, goal::isEnd, PATHFINDING_TIMEOUT_MILLIS);
         AStar.Result result = astar.compute();
 
+        if (MinebotMod.LOGGER.isDebugEnabled()) {
+            BlockDump.logGrid(movements, startX, startY, startZ, (int) Math.floor(targetX), (int) Math.floor(targetZ));
+            if ((int) Math.floor(targetY) != startY) {
+                BlockDump.logGrid(movements, startX, (int) Math.floor(targetY), startZ, (int) Math.floor(targetX), (int) Math.floor(targetZ));
+            }
+        }
+
         if (result.status() == AStar.Status.SUCCESS && result.path().isEmpty()) {
             // Not a failure -- the start position already satisfies
             // GoalNear.isEnd() (we're already within stopDistance), so A*
