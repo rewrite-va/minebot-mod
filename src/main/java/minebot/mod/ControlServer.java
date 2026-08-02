@@ -17,9 +17,17 @@ import java.util.function.Consumer;
  * (chat, position, entities, health) broadcast back over the same
  * connection, rather than Python speaking the Minecraft protocol itself.
  *
- * Bound to 127.0.0.1 only: this channel has no auth of its own (nothing
- * validates who's on the other end), which is fine only as long as it's
- * unreachable from outside this machine.
+ * Bound to 0.0.0.0 (all interfaces), not just 127.0.0.1: the Python
+ * backend commonly runs inside WSL2 in NAT mode, which is a separate
+ * network namespace from Windows -- a loopback-only bind is genuinely
+ * unreachable from there even though it's "the same machine" from a
+ * user's perspective, confirmed live (connection refused against
+ * 127.0.0.1, connect timeout against the WSL-side host-mapped IP against
+ * a loopback-bound port). This channel has no auth of its own (nothing
+ * validates who's on the other end), so binding to all interfaces does
+ * mean anything else on the local network can connect and drive the bot
+ * -- acceptable for a single-user home setup, but worth knowing if this
+ * is ever run somewhere less trusted.
  */
 public final class ControlServer extends WebSocketServer {
     public static final int DEFAULT_PORT = 47893;
@@ -28,7 +36,7 @@ public final class ControlServer extends WebSocketServer {
     private final Consumer<String> onMessage;
 
     public ControlServer(final int port, final Consumer<String> onMessage) {
-        super(new InetSocketAddress("127.0.0.1", port));
+        super(new InetSocketAddress("0.0.0.0", port));
         this.onMessage = onMessage;
     }
 
@@ -56,7 +64,7 @@ public final class ControlServer extends WebSocketServer {
 
     @Override
     public void onStart() {
-        MinebotMod.LOGGER.info("control channel: listening on 127.0.0.1:{}", getPort());
+        MinebotMod.LOGGER.info("control channel: listening on 0.0.0.0:{}", getPort());
     }
 
     /** Sends one JSON event line to every currently-connected backend. */
