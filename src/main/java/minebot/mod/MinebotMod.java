@@ -56,6 +56,7 @@ public final class MinebotMod implements ClientModInitializer {
     public void onInitializeClient() {
         controlClient = new ControlClient("localhost", ControlClient.DEFAULT_PORT, this::handleMessage);
         controlClient.start();
+        new StatusHud(controlClient).register();
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onClientTick);
 
