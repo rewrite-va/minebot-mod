@@ -38,6 +38,7 @@ public final class ControlClient {
 
     private final URI uri;
     private final Consumer<String> onMessage;
+    private final Runnable onConnect;
     private volatile Client client;
     private volatile boolean shuttingDown;
     // Java-WebSocket's WebSocketClient instances are single-use (calling
@@ -50,9 +51,10 @@ public final class ControlClient {
     // of how many callback paths ask for one.
     private final AtomicBoolean reconnectPending = new AtomicBoolean(false);
 
-    public ControlClient(final String host, final int port, final Consumer<String> onMessage) {
+    public ControlClient(final String host, final int port, final Consumer<String> onMessage, final Runnable onConnect) {
         this.uri = URI.create("ws://" + host + ":" + port);
         this.onMessage = onMessage;
+        this.onConnect = onConnect;
     }
 
     public void start() {
@@ -116,6 +118,7 @@ public final class ControlClient {
         @Override
         public void onOpen(final ServerHandshake handshake) {
             MinebotMod.LOGGER.info("control channel: connected to {}", uri);
+            onConnect.run();
         }
 
         @Override

@@ -9,6 +9,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.KeyboardInput;
 import net.minecraft.client.player.LocalPlayer;
+import minebot.mod.pathfinding.Move;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import org.slf4j.Logger;
@@ -48,13 +49,19 @@ public final class MinebotMod implements ClientModInitializer {
     private static final double MAX_STEP_HEIGHT_TRIGGER = 0.1; // aim y this much above us before holding jump
 
     private final ControlState controlState = new ControlState();
-    private final Set<Integer> knownPlayerIds = new HashSet<>();
+    // Mutated from both the client tick thread (broadcastEntityEvents) and
+    // the control channel's own WebSocket thread (onControlChannelConnected,
+    // triggered by ControlClient's onOpen) -- needs real thread-safety, not
+    // just "usually fine", since a race here previously caused every
+    // freshly-restarted Python backend to never learn any already-seen
+    // player's name (see onControlChannelConnected's docstring).
+    private final Set<Integer> knownPlayerIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private ControlClient controlClient;
     private float lastReportedHealth = -1;
 
     @Override
     public void onInitializeClient() {
-        controlClient = new ControlClient("localhost", ControlClient.DEFAULT_PORT, this::handleMessage);
+        controlClient = new ControlClient("localhost", ControlClient.DEFAULT_PORT, this::handleMessage, this::onControlChannelConnected);
         controlClient.start();
         new StatusHud(controlClient).register();
 
@@ -69,6 +76,22 @@ public final class MinebotMod implements ClientModInitializer {
                 broadcastChatEvent(null, message.getString());
             }
         });
+    }
+
+    /**
+     * A fresh Python process has no memory of any entity we've already
+     * reported "add" for in a previous connection -- its EntityTracker
+     * starts empty every time. Without this reset, knownPlayerIds (which
+     * outlives individual control-channel connections, since the game
+     * client itself doesn't restart) would keep treating already-seen
+     * players as already-known and only ever send "move" events for them,
+     * so a freshly (re)started backend could never learn their name (found
+     * live: !follow failed with "no known entity" because only "move"
+     * events -- which carry no name -- had ever been sent for the
+     * player).
+     */
+    private void onControlChannelConnected() {
+        knownPlayerIds.clear();
     }
 
     private void onClientTick(final Minecraft client) {
@@ -101,13 +124,15 @@ public final class MinebotMod implements ClientModInitializer {
 
     /**
      * Turns the current high-level goal (ControlState) into a concrete
-     * per-tick movement input: aim yaw at the goal's target position, hold
-     * forward while still farther than stop_distance, hold jump whenever
-     * the target sits meaningfully above us (matches how a real player
-     * reaches a ledge one step higher than automatic step-height climbing
-     * alone covers -- see minebot's earlier pure-Python physics port,
-     * FINDINGS.md, for why this specific heuristic was chosen there;
-     * reused here since it's the same real-client movement problem).
+     * per-tick movement input. Rather than walking straight at the goal's
+     * raw (x, y, z) -- which only worked for small ledges, since it relied
+     * on passive gravity/step-height to cover any vertical gap, and left
+     * the bot stranded at the edge of a floor instead of finding a real
+     * route down -- this plans (or reuses a still-fresh) A* path via
+     * ControlState.pathTracker and aims at the next waypoint along it
+     * instead. Falls back to the raw target position if pathfinding
+     * couldn't find a route (e.g. unloaded chunks) so the bot still tries
+     * to make progress rather than freezing.
      */
     private MovementIntent resolveMovementIntent(final LocalPlayer player, final ClientLevel level) {
         MovementIntent intent = new MovementIntent();
@@ -124,14 +149,35 @@ public final class MinebotMod implements ClientModInitializer {
         };
 
         if (target == null) {
+            controlState.pathTracker.reset();
             return intent;
         }
 
-        double dx = target[0] - player.getX();
-        double dz = target[2] - player.getZ();
+        double selfX = player.getX();
+        double selfY = player.getY();
+        double selfZ = player.getZ();
+
+        controlState.pathTracker.maybeReplan(
+            level, selfX, selfY, selfZ, target[0], target[1], target[2], controlState.stopDistance
+        );
+        Move waypoint = controlState.pathTracker.nextWaypoint(selfX, selfY, selfZ);
+
+        // Aim at the next unreached waypoint's block center, or the raw
+        // target if we have no plan (no path found / not yet computed).
+        double aimX = waypoint != null ? waypoint.x + 0.5 : target[0];
+        double aimY = waypoint != null ? waypoint.y : target[1];
+        double aimZ = waypoint != null ? waypoint.z + 0.5 : target[2];
+
+        double dx = aimX - selfX;
+        double dz = aimZ - selfZ;
         double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
 
-        if (horizontalDistance > controlState.stopDistance) {
+        // Only the raw target (not a waypoint) should stop the bot when
+        // close enough -- a waypoint just short of the goal must still be
+        // walked through, not treated as "arrived".
+        double distanceToStopAt = waypoint != null ? 0.0 : controlState.stopDistance;
+
+        if (horizontalDistance > distanceToStopAt) {
             intent.forward = true;
             // Vanilla yaw convention: 0 = south/+z, matching Entity.getYRot()
             // and the atan2(-dx, dz) form used throughout the decompiled
@@ -139,7 +185,7 @@ public final class MinebotMod implements ClientModInitializer {
             intent.yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
         }
 
-        double dy = target[1] - player.getY();
+        double dy = aimY - selfY;
         if (dy > MAX_STEP_HEIGHT_TRIGGER) {
             intent.jump = true;
         }

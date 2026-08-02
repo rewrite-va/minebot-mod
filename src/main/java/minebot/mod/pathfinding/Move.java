@@ -1,0 +1,49 @@
+package minebot.mod.pathfinding;
+
+/**
+ * One A* graph node: a whole-block position the bot could stand at.
+ * Direct port of minebot's earlier Python pathfinding port
+ * (pure-protocol-backend branch, itself a port of
+ * mineflayer-pathfinder@2.4.5's lib/move.js). `cost` is the edge cost of
+ * the move that produced this node, added to the parent's g by the
+ * search -- not a total path cost by itself.
+ */
+public final class Move {
+    public final int x;
+    public final int y;
+    public final int z;
+    public final double cost;
+
+    public Move(final double x, final double y, final double z, final double cost) {
+        this.x = (int) Math.floor(x);
+        this.y = (int) Math.floor(y);
+        this.z = (int) Math.floor(z);
+        this.cost = cost;
+    }
+
+    public long hash() {
+        // Packs (x, y, z) into a single long for cheap hashing/equality in
+        // the search's open/closed sets -- real Minecraft coordinates fit
+        // comfortably within 21 bits per axis (+-1,048,575), far beyond any
+        // reachable world position.
+        return ((long) (x & 0x1FFFFF) << 42) | ((long) (y & 0x1FFFFF) << 21) | (long) (z & 0x1FFFFF);
+    }
+
+    @Override
+    public boolean equals(final Object obj) {
+        if (!(obj instanceof Move other)) {
+            return false;
+        }
+        return x == other.x && y == other.y && z == other.z;
+    }
+
+    @Override
+    public int hashCode() {
+        return Long.hashCode(hash());
+    }
+
+    @Override
+    public String toString() {
+        return "Move(" + x + ", " + y + ", " + z + ", cost=" + cost + ")";
+    }
+}

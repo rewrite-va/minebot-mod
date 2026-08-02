@@ -1,5 +1,7 @@
 package minebot.mod;
 
+import minebot.mod.pathfinding.PathTracker;
+
 /**
  * The bot's current movement goal, set by whatever command the Python
  * backend last sent over the WebSocket control channel. Read every client
@@ -31,8 +33,15 @@ public final class ControlState {
 
     public volatile double stopDistance = 2.0;
 
+    // Owns the currently-planned A* route toward whatever target the mode
+    // above resolves to -- lives here (rather than as a MinebotMod field)
+    // so it naturally gets discarded on clear()/setGoto()/setFollow(),
+    // same lifetime as the goal it was planned for.
+    public final PathTracker pathTracker = new PathTracker();
+
     public void clear() {
         mode = Mode.IDLE;
+        pathTracker.reset();
     }
 
     public void setGoto(final double x, final double y, final double z, final double stopDistance) {
@@ -41,11 +50,13 @@ public final class ControlState {
         this.gotoY = y;
         this.gotoZ = z;
         this.stopDistance = stopDistance;
+        this.pathTracker.reset();
     }
 
     public void setFollow(final int entityId, final double stopDistance) {
         this.mode = Mode.FOLLOW;
         this.followEntityId = entityId;
         this.stopDistance = stopDistance;
+        this.pathTracker.reset();
     }
 }
