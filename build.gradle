@@ -1,0 +1,54 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version '1.15-SNAPSHOT'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+    // Embeds a WebSocket server directly in the client (no built-in JDK
+    // WebSocket server exists) -- this is minebot's local control channel
+    // to the Python backend, not exposed to the internet. `include` bundles
+    // it into the mod jar (Loom's jar-in-jar) since players/other mods
+    // won't have this on their classpath otherwise.
+    include implementation('org.java-websocket:Java-WebSocket:1.5.7')
+
+    // Minecraft itself bundles Gson at runtime, but not as a Loom-visible
+    // dependency for compilation -- declare it explicitly (not `include`d,
+    // since it's already on the real runtime classpath) purely so the
+    // compiler can see it.
+    compileOnly 'com.google.code.gson:gson:2.10.1'
+}
+
+processResources {
+    inputs.property "version", project.version
+
+    filesMatching("fabric.mod.json") {
+        expand "version": inputs.properties.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 25
+}
+
+java {
+    withSourcesJar()
+
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
+}
