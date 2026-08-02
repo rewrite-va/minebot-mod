@@ -24,11 +24,19 @@ import java.util.Set;
  * mod runs inside a real Minecraft client logged into the bot's account
  * (normal Microsoft/Mojang auth, nothing custom), and is the *only* thing
  * that actually talks to the Minecraft server. The Python backend
- * (separate repo) connects to this mod's local WebSocket control channel
- * (ControlServer) instead of implementing the protocol itself -- it sends
- * high-level goals ("follow entity N", "goto x y z", "stop") and receives
- * game events (chat, position, entities, health) back, while all actual
- * movement runs through Minecraft's own real physics via MinebotInput.
+ * (separate repo) runs its own WebSocket server, and this mod connects
+ * out to it (ControlClient) instead of implementing the protocol itself --
+ * Python sends high-level goals ("follow entity N", "goto x y z", "stop")
+ * and receives game events (chat, position, entities, health) back, while
+ * all actual movement runs through Minecraft's own real physics via
+ * MinebotInput.
+ *
+ * The mod is the WebSocket *client*, not the server, specifically because
+ * the Python backend commonly runs inside WSL2: WSL2's default networking
+ * only forwards localhost connections from Windows into WSL2, not the
+ * reverse, so a mod-side server was unreachable from Python no matter how
+ * it was bound (confirmed live) -- see ControlClient's docstring for the
+ * full story.
  *
  * See /home/colaila/git/minebot's `pure-protocol-backend` branch for the
  * previous from-scratch protocol implementation this replaces for
@@ -41,13 +49,13 @@ public final class MinebotMod implements ClientModInitializer {
 
     private final ControlState controlState = new ControlState();
     private final Set<Integer> knownPlayerIds = new HashSet<>();
-    private ControlServer controlServer;
+    private ControlClient controlClient;
     private float lastReportedHealth = -1;
 
     @Override
     public void onInitializeClient() {
-        controlServer = new ControlServer(ControlServer.DEFAULT_PORT, this::handleMessage);
-        controlServer.start();
+        controlClient = new ControlClient("localhost", ControlClient.DEFAULT_PORT, this::handleMessage);
+        controlClient.start();
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onClientTick);
 
@@ -179,7 +187,7 @@ public final class MinebotMod implements ClientModInitializer {
             event.addProperty("sender", sender);
         }
         event.addProperty("text", text);
-        controlServer.broadcastEvent(event.toString());
+        controlClient.sendEvent(event.toString());
     }
 
     private void broadcastPositionEvent(final LocalPlayer player) {
@@ -191,14 +199,14 @@ public final class MinebotMod implements ClientModInitializer {
         event.addProperty("yaw", player.getYRot());
         event.addProperty("pitch", player.getXRot());
         event.addProperty("on_ground", player.onGround());
-        controlServer.broadcastEvent(event.toString());
+        controlClient.sendEvent(event.toString());
     }
 
     private void broadcastHealthEvent(final float health) {
         JsonObject event = new JsonObject();
         event.addProperty("type", "health");
         event.addProperty("health", health);
-        controlServer.broadcastEvent(event.toString());
+        controlClient.sendEvent(event.toString());
     }
 
     /**
@@ -252,6 +260,6 @@ public final class MinebotMod implements ClientModInitializer {
             event.addProperty("y", entity.getY());
             event.addProperty("z", entity.getZ());
         }
-        controlServer.broadcastEvent(event.toString());
+        controlClient.sendEvent(event.toString());
     }
 }
