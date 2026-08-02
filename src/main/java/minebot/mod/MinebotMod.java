@@ -6,11 +6,10 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.player.KeyboardInput;
 import net.minecraft.client.player.LocalPlayer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.IOException;
 
 /**
  * Entry point for the client-mod half of minebot's architecture pivot: the
@@ -58,7 +57,7 @@ public final class MinebotMod implements ClientModInitializer {
         }
 
         if (!(player.input instanceof MinebotInput)) {
-            player.input = new MinebotInput(controlState);
+            player.input = new MinebotInput(controlState, new KeyboardInput(client.options));
         }
 
         Float targetYaw = controlState.targetYaw;
