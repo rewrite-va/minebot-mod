@@ -23,16 +23,31 @@ import net.minecraft.world.item.ItemStack;
  */
 public final class InventoryReporter {
     private String lastSnapshotJson;
+    // A freshly (re)connected Python process has no memory of the bot's
+    // current inventory (InventoryTracker starts empty every time) --
+    // without forcing one full snapshot right after connect, Python would
+    // only ever learn the starting inventory once something *changes*
+    // (maybeBroadcast's normal dedup-on-content-change gate), and until
+    // then treats itself as carrying nothing at all. Set from
+    // MinebotMod.onControlChannelConnected.
+    private boolean forceBroadcastOnNextTick = true;
 
-    /** Safe to call every tick -- builds a snapshot and only actually sends it if it differs from the last one sent. */
+    /** Safe to call every tick -- builds a snapshot and only actually sends it if it differs from the last one sent, or a fresh connection needs the current state regardless of whether it changed. */
     public void maybeBroadcast(final Inventory inventory, final ControlClient controlClient) {
         JsonObject event = buildSnapshot(inventory);
         String json = event.toString();
-        if (json.equals(lastSnapshotJson)) {
+        boolean changed = !json.equals(lastSnapshotJson);
+        if (!changed && !forceBroadcastOnNextTick) {
             return;
         }
         lastSnapshotJson = json;
+        forceBroadcastOnNextTick = false;
         controlClient.sendEvent(json);
+    }
+
+    /** Called on every fresh control-channel connection so the next tick's snapshot is sent unconditionally, even if it's identical to whatever was last sent to a previous (now-gone) connection. */
+    public void forceNextBroadcast() {
+        forceBroadcastOnNextTick = true;
     }
 
     private static JsonObject buildSnapshot(final Inventory inventory) {

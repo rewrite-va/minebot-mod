@@ -103,6 +103,7 @@ public final class MinebotMod implements ClientModInitializer {
      */
     private void onControlChannelConnected() {
         knownPlayerIds.clear();
+        inventoryReporter.forceNextBroadcast();
         broadcastHelloEvent();
     }
 
@@ -450,6 +451,7 @@ public final class MinebotMod implements ClientModInitializer {
     private void broadcastPositionEvent(final LocalPlayer player) {
         JsonObject event = new JsonObject();
         event.addProperty("type", "position");
+        event.addProperty("name", player.getScoreboardName());
         event.addProperty("x", player.getX());
         event.addProperty("y", player.getY());
         event.addProperty("z", player.getZ());
