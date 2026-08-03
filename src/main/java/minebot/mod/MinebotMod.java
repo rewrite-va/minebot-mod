@@ -60,6 +60,7 @@ public final class MinebotMod implements ClientModInitializer {
     private final DoorOpener doorOpener = new DoorOpener();
     private final FoodEater foodEater = new FoodEater();
     private final InventoryReporter inventoryReporter = new InventoryReporter();
+    private final RespawnHandler respawnHandler = new RespawnHandler(this::broadcastDeathEvent, this::broadcastRespawnEvent);
     private ControlClient controlClient;
     private float lastReportedHealth = -1;
 
@@ -118,7 +119,10 @@ public final class MinebotMod implements ClientModInitializer {
 
         maybeCompleteGive(player, level);
 
-        foodEater.maybeEat(player);
+        respawnHandler.tick(player);
+        if (!player.isDeadOrDying()) {
+            foodEater.maybeEat(player);
+        }
 
         broadcastPositionEvent(player);
         broadcastEntityEvents(player, level);
@@ -322,6 +326,27 @@ public final class MinebotMod implements ClientModInitializer {
         JsonObject event = new JsonObject();
         event.addProperty("type", "health");
         event.addProperty("health", health);
+        controlClient.sendEvent(event.toString());
+    }
+
+    /**
+     * A real "we died" signal, distinct from the health event's
+     * `health <= 0.0`: health can legitimately read exactly 0 only
+     * transiently or under other edge cases, whereas this only fires once
+     * per RespawnHandler-observed death, right as it also triggers the
+     * auto-respawn -- Python can rely on this firing exactly once per
+     * death instead of re-deriving "did we just die" from watching health
+     * values itself.
+     */
+    private void broadcastDeathEvent() {
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "death");
+        controlClient.sendEvent(event.toString());
+    }
+
+    private void broadcastRespawnEvent() {
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "respawn");
         controlClient.sendEvent(event.toString());
     }
 
