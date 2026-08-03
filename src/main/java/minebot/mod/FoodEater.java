@@ -46,7 +46,14 @@ public final class FoodEater {
 
         boolean isLowHealth = player.getHealth() <= player.getMaxHealth() * LOW_HEALTH_FRACTION;
         if (lowHealth.fire(isLowHealth)) {
-            int hearts = Math.round(player.getHealth() / 2.0f);
+            // One decimal place, not Math.round -- health is reported in
+            // half-heart increments (2 HP per heart), so e.g. 0.5 HP is a
+            // real, nonzero quarter-heart; rounding that to the nearest
+            // whole heart reported "0 hearts" for a player who was still
+            // alive, which read as a bug (found live: chat showed "I have
+            // 0 hearts!" while the player watching could see a sliver of
+            // a heart still up).
+            String hearts = String.format(java.util.Locale.ROOT, "%.1f", player.getHealth() / 2.0f);
             sendChat(player, Messages.get("food_eater.eating", "hearts", hearts));
         }
         if (!isLowHealth) {
