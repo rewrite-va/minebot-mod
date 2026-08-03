@@ -52,6 +52,37 @@ processResources {
     }
 }
 
+// Bakes the current git commit + build time into the jar so the running
+// mod can report exactly what code it's actually running -- added after
+// a real live-debugging session where a jar had been rebuilt with a fix
+// but the *running* client hadn't been restarted to pick it up, and
+// there was no way from the Python side's logs alone to tell "stale
+// client" apart from "the fix doesn't work". MinebotMod broadcasts this
+// on every control-channel connect (see broadcastHelloEvent); the
+// backend logs it and can compare it against `git rev-parse HEAD` for
+// this repo to catch the same class of bug automatically going forward.
+tasks.register("generateBuildInfo") {
+    def outputDir = layout.buildDirectory.dir("generated/buildInfo")
+    outputs.dir(outputDir)
+    doLast {
+        def commit = providers.exec {
+            commandLine "git", "rev-parse", "HEAD"
+        }.standardOutput.asText.get().trim()
+        def dirty = providers.exec {
+            commandLine "git", "status", "--porcelain"
+            ignoreExitValue = true
+        }.standardOutput.asText.get().trim()
+        def props = new File(outputDir.get().asFile, "minebot-mod-build-info.properties")
+        props.parentFile.mkdirs()
+        props.text = """\
+commit=${commit}${dirty ? "-dirty" : ""}
+built_at=${new Date().toInstant()}
+"""
+    }
+}
+sourceSets.main.resources.srcDir(tasks.generateBuildInfo)
+processResources.dependsOn(tasks.generateBuildInfo)
+
 tasks.withType(JavaCompile).configureEach {
     it.options.release = 25
 }

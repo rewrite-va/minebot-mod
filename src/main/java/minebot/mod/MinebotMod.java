@@ -97,6 +97,23 @@ public final class MinebotMod implements ClientModInitializer {
      */
     private void onControlChannelConnected() {
         knownPlayerIds.clear();
+        broadcastHelloEvent();
+    }
+
+    /**
+     * Reports exactly what code this running mod instance actually is
+     * (git commit + build time -- see BuildInfo), the moment the control
+     * channel connects. The backend logs this loudly so a stale deployed-
+     * but-not-yet-restarted client is obvious from the log instead of
+     * looking like a fix that "doesn't work" (found live -- see
+     * AGENTS.md's documented deploy trap).
+     */
+    private void broadcastHelloEvent() {
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "hello");
+        event.addProperty("commit", BuildInfo.COMMIT);
+        event.addProperty("built_at", BuildInfo.BUILT_AT);
+        controlClient.sendEvent(event.toString());
     }
 
     private void onClientTick(final Minecraft client) {
