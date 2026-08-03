@@ -64,6 +64,14 @@ processResources {
 tasks.register("generateBuildInfo") {
     def outputDir = layout.buildDirectory.dir("generated/buildInfo")
     outputs.dir(outputDir)
+    // The whole point is to capture the *current* commit/dirty-state/
+    // timestamp on every build -- none of which Gradle can see as a
+    // changed "input" (the task has no declared inputs at all), so
+    // without this it ran once, then was considered UP-TO-DATE forever
+    // after, silently baking in a stale commit on every later build
+    // (found immediately after adding this task: a rebuild right after
+    // a new commit still reported the previous one).
+    outputs.upToDateWhen { false }
     doLast {
         def commit = providers.exec {
             commandLine "git", "rev-parse", "HEAD"
