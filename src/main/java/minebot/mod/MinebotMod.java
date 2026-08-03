@@ -75,6 +75,7 @@ public final class MinebotMod implements ClientModInitializer {
         controlClient = new ControlClient("localhost", ControlClient.DEFAULT_PORT, this::handleMessage, this::onControlChannelConnected);
         controlClient.start();
         new StatusHud(controlClient).register();
+        new PathVisualizer(controlState.pathTracker).register();
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onClientTick);
 
@@ -348,6 +349,12 @@ public final class MinebotMod implements ClientModInitializer {
             // and the atan2(-dx, dz) form used throughout the decompiled
             // source's own movement code.
             intent.yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+            // Level horizon while actively walking a waypoint -- without
+            // this, pitch was simply never touched here (only intent.yaw
+            // was), so it stayed at whatever NearbyPlayerLookAt's last
+            // glance left it at, tilted up/down at a nearby player instead
+            // of looking straight ahead while moving.
+            intent.pitch = 0f;
         }
 
         double dy = aimY - selfY;

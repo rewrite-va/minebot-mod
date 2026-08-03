@@ -4,6 +4,7 @@ import minebot.mod.MinebotMod;
 import net.minecraft.client.multiplayer.ClientLevel;
 
 import java.util.ArrayDeque;
+import java.util.Collection;
 import java.util.Deque;
 
 /**
@@ -138,5 +139,10 @@ public final class PathTracker {
     public void reset() {
         currentPath.clear();
         pathComputedFor = null;
+    }
+
+    /** Read-only view of the currently planned path, in walk order -- for debug visualization (PathVisualizer). */
+    public Collection<Move> waypoints() {
+        return currentPath;
     }
 }
