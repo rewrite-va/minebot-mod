@@ -1,6 +1,7 @@
 package minebot.mod;
 
 import minebot.mod.pathfinding.PathTracker;
+import minebot.mod.util.EdgeTrigger;
 
 /**
  * The bot's current movement goal, set by whatever command the Python
@@ -45,9 +46,17 @@ public final class ControlState {
     // same lifetime as the goal it was planned for.
     public final PathTracker pathTracker = new PathTracker();
 
+    // Fires once (see MinebotMod.resolveMovementIntent) when a GOTO goal's
+    // distance-to-target first drops under stopDistance. Lives here (not
+    // as a MinebotMod field) for the same reason pathTracker does: a fresh
+    // setGoto to a new target must reset it, or a second !find/!goto in a
+    // row would never report a fresh arrival once the first one fired.
+    public final EdgeTrigger gotoArrived = new EdgeTrigger();
+
     public void clear() {
         mode = Mode.IDLE;
         pathTracker.reset();
+        gotoArrived.reset();
     }
 
     public void setGoto(final double x, final double y, final double z, final double stopDistance) {
@@ -57,6 +66,7 @@ public final class ControlState {
         this.gotoZ = z;
         this.stopDistance = stopDistance;
         this.pathTracker.reset();
+        this.gotoArrived.reset();
     }
 
     public void setFollow(final int entityId, final double stopDistance) {
@@ -64,6 +74,7 @@ public final class ControlState {
         this.followEntityId = entityId;
         this.stopDistance = stopDistance;
         this.pathTracker.reset();
+        this.gotoArrived.reset();
     }
 
     /**
@@ -81,5 +92,6 @@ public final class ControlState {
         this.giveCount = count;
         this.stopDistance = stopDistance;
         this.pathTracker.reset();
+        this.gotoArrived.reset();
     }
 }

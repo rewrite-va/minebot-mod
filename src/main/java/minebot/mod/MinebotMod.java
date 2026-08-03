@@ -9,8 +9,12 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.KeyboardInput;
 import net.minecraft.client.player.LocalPlayer;
+import minebot.mod.pathfinding.BlockFinder;
 import minebot.mod.pathfinding.DoorOpener;
 import minebot.mod.pathfinding.Move;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.Identifier;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import org.slf4j.Logger;
@@ -48,6 +52,7 @@ public final class MinebotMod implements ClientModInitializer {
     public static final Logger LOGGER = LoggerFactory.getLogger("minebot-mod");
 
     private static final double MAX_STEP_HEIGHT_TRIGGER = 0.1; // aim y this much above us before holding jump
+    private static final int DEFAULT_FIND_RADIUS = 64;
 
     private final ControlState controlState = new ControlState();
     // Mutated from both the client tick thread (broadcastEntityEvents) and
@@ -214,6 +219,67 @@ public final class MinebotMod implements ClientModInitializer {
     }
 
     /**
+     * !find resolves `query` as an entity type first, falling back to a
+     * block type if no entity type by that name matched (e.g. "cow" is an
+     * entity, not a block, so it resolves as one; "stone" has no entity
+     * type, so it falls through to the block lookup) -- this mirrors the
+     * user's stated intent for a single unified !find rather than separate
+     * !searchForBlock/!searchForEntity commands. Runs synchronously on the
+     * control channel's network thread rather than the tick thread, same
+     * as every other handleMessage case; BlockFinder/EntityFinder only
+     * read world state (no player-null guard needed beyond the existing
+     * withPlayer-style null checks below since level can be null between
+     * a disconnect/reconnect same as player).
+     */
+    private void handleFind(final String query, final int radius) {
+        // handleMessage (and so this) runs on the WebSocket library's own
+        // thread, not the render/tick thread -- unlike withPlayer's simple
+        // inventory mutations, BlockFinder/EntityFinder iterate live chunk
+        // and entity collections, which is genuinely unsafe to do off the
+        // main thread (concurrent modification from the tick thread is a
+        // real hazard, not just a style concern). Minecraft.execute queues
+        // the actual lookup to run on the main thread instead, same as
+        // vanilla/Fabric code scheduling cross-thread work back onto it.
+        Minecraft.getInstance().execute(() -> runFind(query, radius));
+    }
+
+    private void runFind(final String query, final int radius) {
+        LocalPlayer player = Minecraft.getInstance().player;
+        ClientLevel level = Minecraft.getInstance().level;
+        if (player == null || level == null) {
+            broadcastFindResultEvent(query, false, false, "entity", 0, 0, 0);
+            return;
+        }
+
+        // BLOCK/ENTITY_TYPE are DefaultedRegistry -- looking up an unknown
+        // key silently falls back to a default (air / pig) instead of
+        // failing, so a genuinely unrecognized query (a typo, or a word
+        // that isn't a block or entity at all) would otherwise report the
+        // exact same "not found nearby" as a real type that's just out of
+        // range -- found live: a player asked for the error message to
+        // distinguish those two cases ("!find aaa" vs "!find allay" with
+        // no allay around). containsKey checks real registry membership,
+        // independent of the defaulting behavior.
+        Identifier id = Identifier.parse(query.contains(":") ? query : "minecraft:" + query);
+        boolean recognized = BuiltInRegistries.ENTITY_TYPE.containsKey(id) || BuiltInRegistries.BLOCK.containsKey(id);
+
+        Entity entity = EntityFinder.findNearestEntity(level, player.position(), id.toString(), radius);
+        if (entity != null) {
+            broadcastFindResultEvent(query, true, recognized, "entity", entity.getX(), entity.getY(), entity.getZ());
+            return;
+        }
+
+        BlockPos center = player.blockPosition();
+        BlockPos block = BlockFinder.findNearestBlock(level, center, id.toString(), radius);
+        if (block != null) {
+            broadcastFindResultEvent(query, true, recognized, "block", block.getX() + 0.5, block.getY(), block.getZ() + 0.5);
+            return;
+        }
+
+        broadcastFindResultEvent(query, false, recognized, "entity", 0, 0, 0);
+    }
+
+    /**
      * Turns the current high-level goal (ControlState) into a concrete
      * per-tick movement input. Rather than walking straight at the goal's
      * raw (x, y, z) -- which only worked for small ledges, since it relied
@@ -241,6 +307,7 @@ public final class MinebotMod implements ClientModInitializer {
 
         if (target == null) {
             controlState.pathTracker.reset();
+            controlState.gotoArrived.reset();
             return intent;
         }
 
@@ -268,6 +335,11 @@ public final class MinebotMod implements ClientModInitializer {
         // close enough -- a waypoint just short of the goal must still be
         // walked through, not treated as "arrived".
         double distanceToStopAt = waypoint != null ? 0.0 : controlState.stopDistance;
+
+        boolean arrivedNow = controlState.mode == ControlState.Mode.GOTO && waypoint == null && horizontalDistance <= distanceToStopAt;
+        if (controlState.gotoArrived.fire(arrivedNow)) {
+            broadcastArrivedEvent();
+        }
 
         if (horizontalDistance > distanceToStopAt) {
             intent.forward = true;
@@ -299,6 +371,21 @@ public final class MinebotMod implements ClientModInitializer {
             return;
         }
 
+        try {
+            dispatchMessage(type, json);
+        } catch (RuntimeException e) {
+            // handleMessage runs on the WebSocket library's own thread
+            // (ControlClient.Client.onMessage), not ours -- an exception
+            // thrown here is caught by that library's internals, not
+            // logged anywhere by us, so a bug in any command handler
+            // previously vanished with zero trace in either log (found
+            // live debugging !find: a world-access bug produced no
+            // response and no error, anywhere).
+            LOGGER.warn("control channel: command '{}' failed: {}", type, e.toString(), e);
+        }
+    }
+
+    private void dispatchMessage(final String type, final JsonObject json) {
         switch (type) {
             case "goto" -> controlState.setGoto(
                 json.get("x").getAsDouble(), json.get("y").getAsDouble(), json.get("z").getAsDouble(),
@@ -325,6 +412,10 @@ public final class MinebotMod implements ClientModInitializer {
             case "give" -> controlState.setGive(
                 json.get("entity_id").getAsInt(), json.get("slot").getAsInt(), json.get("count").getAsInt(),
                 json.has("stop_distance") ? json.get("stop_distance").getAsDouble() : 2.0
+            );
+            case "find" -> handleFind(
+                json.get("query").getAsString(),
+                json.has("radius") ? json.get("radius").getAsInt() : DEFAULT_FIND_RADIUS
             );
             default -> LOGGER.warn("control channel: unknown command type '{}'", type);
         }
@@ -393,6 +484,46 @@ public final class MinebotMod implements ClientModInitializer {
     private void broadcastRespawnEvent() {
         JsonObject event = new JsonObject();
         event.addProperty("type", "respawn");
+        controlClient.sendEvent(event.toString());
+    }
+
+    /**
+     * Fires exactly once when a GOTO goal's distance-to-target first drops
+     * under stopDistance (see ControlState.gotoArrived / resolveMovementIntent)
+     * -- FOLLOW/GIVE never fire this, since neither has a single "arrival"
+     * moment (FOLLOW tracks a moving target indefinitely; GIVE's completion
+     * is reported by maybeCompleteGive dropping the item, a different
+     * concept). General-purpose, not !find-specific: any command that
+     * issues a `goto` can react to this the same way.
+     */
+    private void broadcastArrivedEvent() {
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "arrived");
+        controlClient.sendEvent(event.toString());
+    }
+
+    /**
+     * Reports the outcome of a `find` command -- x/y/z/kind are only
+     * meaningful when found=true. Fire-and-forget like every other event
+     * here (no request id): only one !find is ever in flight at a time
+     * (chat commands are dispatched one at a time), so the Python side can
+     * simply await the next find_result it receives.
+     */
+    private void broadcastFindResultEvent(
+        final String query, final boolean found, final boolean recognized,
+        final String kind, final double x, final double y, final double z
+    ) {
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "find_result");
+        event.addProperty("query", query);
+        event.addProperty("found", found);
+        event.addProperty("recognized", recognized);
+        if (found) {
+            event.addProperty("kind", kind);
+            event.addProperty("x", x);
+            event.addProperty("y", y);
+            event.addProperty("z", z);
+        }
         controlClient.sendEvent(event.toString());
     }
 
