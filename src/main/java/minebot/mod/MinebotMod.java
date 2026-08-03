@@ -59,6 +59,7 @@ public final class MinebotMod implements ClientModInitializer {
     private final Set<Integer> knownPlayerIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final DoorOpener doorOpener = new DoorOpener();
     private final FoodEater foodEater = new FoodEater();
+    private final InventoryReporter inventoryReporter = new InventoryReporter();
     private ControlClient controlClient;
     private float lastReportedHealth = -1;
 
@@ -115,16 +116,51 @@ public final class MinebotMod implements ClientModInitializer {
             player.setYRot(intent.yaw);
         }
 
+        maybeCompleteGive(player, level);
+
         foodEater.maybeEat(player);
 
         broadcastPositionEvent(player);
         broadcastEntityEvents(player, level);
+        inventoryReporter.maybeBroadcast(player.getInventory(), controlClient);
 
         float health = player.getHealth();
         if (health != lastReportedHealth) {
             lastReportedHealth = health;
             broadcastHealthEvent(health);
         }
+    }
+
+    /**
+     * GIVE walks toward the recipient the same way FOLLOW does (see
+     * resolveMovementIntent's GIVE branch); once within stopDistance of
+     * them, this drops the requested slot/count and clears back to IDLE.
+     * Checked every tick right after movement resolves, using the same
+     * live entity lookup resolveMovementIntent uses -- if the recipient
+     * has gone out of view (level.getEntity returns null, e.g. they
+     * disconnected or moved out of render distance), the goal is
+     * abandoned rather than left stuck forever with no target to walk
+     * toward or measure distance to.
+     */
+    private void maybeCompleteGive(final LocalPlayer player, final ClientLevel level) {
+        if (controlState.mode != ControlState.Mode.GIVE) {
+            return;
+        }
+        Entity recipient = level.getEntity(controlState.followEntityId);
+        if (recipient == null) {
+            LOGGER.warn("give: recipient entity {} no longer visible, abandoning", controlState.followEntityId);
+            controlState.clear();
+            return;
+        }
+        double dx = recipient.getX() - player.getX();
+        double dy = recipient.getY() - player.getY();
+        double dz = recipient.getZ() - player.getZ();
+        double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (distance > controlState.stopDistance) {
+            return;
+        }
+        InventoryActions.drop(player, controlState.giveSlot, controlState.giveCount);
+        controlState.clear();
     }
 
     /**
@@ -145,7 +181,7 @@ public final class MinebotMod implements ClientModInitializer {
         Double[] target = switch (controlState.mode) {
             case IDLE -> null;
             case GOTO -> new Double[]{controlState.gotoX, controlState.gotoY, controlState.gotoZ};
-            case FOLLOW -> {
+            case FOLLOW, GIVE -> {
                 Entity followed = level.getEntity(controlState.followEntityId);
                 yield followed != null
                     ? new Double[]{followed.getX(), followed.getY(), followed.getZ()}
@@ -229,7 +265,34 @@ public final class MinebotMod implements ClientModInitializer {
                     client.player.connection.sendChat(json.get("text").getAsString());
                 }
             }
+            case "move_to_hotbar" -> withPlayer(player -> InventoryActions.moveToHotbar(
+                player, json.get("slot").getAsInt(), json.get("hotbar_slot").getAsInt()
+            ));
+            case "equip" -> withPlayer(player -> InventoryActions.equip(player, json.get("slot").getAsInt()));
+            case "drop" -> withPlayer(player -> InventoryActions.drop(
+                player, json.get("slot").getAsInt(), json.get("count").getAsInt()
+            ));
+            case "give" -> controlState.setGive(
+                json.get("entity_id").getAsInt(), json.get("slot").getAsInt(), json.get("count").getAsInt(),
+                json.has("stop_distance") ? json.get("stop_distance").getAsDouble() : 2.0
+            );
             default -> LOGGER.warn("control channel: unknown command type '{}'", type);
+        }
+    }
+
+    /**
+     * handleMessage runs on the WebSocket's own network thread (see
+     * ControlClient), not the client tick thread -- unlike "chat" (which
+     * only needs the connection, already null-checked inline) the new
+     * inventory commands need the live LocalPlayer, which can be briefly
+     * null between a disconnect and reconnect (same window the "chat"
+     * case's own inline null check already guards against). Centralizes
+     * that guard instead of repeating it in every new case.
+     */
+    private void withPlayer(final java.util.function.Consumer<LocalPlayer> action) {
+        LocalPlayer player = Minecraft.getInstance().player;
+        if (player != null) {
+            action.accept(player);
         }
     }
 

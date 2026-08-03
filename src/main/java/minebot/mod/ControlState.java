@@ -19,7 +19,7 @@ import minebot.mod.pathfinding.PathTracker;
  * race risk is.
  */
 public final class ControlState {
-    public enum Mode { IDLE, GOTO, FOLLOW }
+    public enum Mode { IDLE, GOTO, FOLLOW, GIVE }
 
     public volatile Mode mode = Mode.IDLE;
 
@@ -29,7 +29,13 @@ public final class ControlState {
     public volatile double gotoZ;
 
     // FOLLOW: a live entity, re-resolved to its current position every tick.
+    // GIVE also walks toward a live entity (the recipient) the same way,
+    // reusing followEntityId as the target.
     public volatile int followEntityId;
+
+    // GIVE only: which inventory slot/how much to drop once in range.
+    public volatile int giveSlot;
+    public volatile int giveCount;
 
     public volatile double stopDistance = 2.0;
 
@@ -56,6 +62,23 @@ public final class ControlState {
     public void setFollow(final int entityId, final double stopDistance) {
         this.mode = Mode.FOLLOW;
         this.followEntityId = entityId;
+        this.stopDistance = stopDistance;
+        this.pathTracker.reset();
+    }
+
+    /**
+     * Walks toward `entityId` (the recipient) the same way FOLLOW does,
+     * and once within `stopDistance`, MinebotMod's tick loop drops
+     * `count` of `slot`'s contents and clears back to IDLE -- see
+     * MinebotMod.resolveMovementIntent's GIVE branch for the completion
+     * check, since that's where live distance-to-target is already
+     * computed every tick.
+     */
+    public void setGive(final int entityId, final int slot, final int count, final double stopDistance) {
+        this.mode = Mode.GIVE;
+        this.followEntityId = entityId;
+        this.giveSlot = slot;
+        this.giveCount = count;
         this.stopDistance = stopDistance;
         this.pathTracker.reset();
     }
