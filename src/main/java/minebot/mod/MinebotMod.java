@@ -58,6 +58,7 @@ public final class MinebotMod implements ClientModInitializer {
     // player's name (see onControlChannelConnected's docstring).
     private final Set<Integer> knownPlayerIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final DoorOpener doorOpener = new DoorOpener();
+    private final FoodEater foodEater = new FoodEater();
     private ControlClient controlClient;
     private float lastReportedHealth = -1;
 
@@ -113,6 +114,8 @@ public final class MinebotMod implements ClientModInitializer {
         if (intent.yaw != null) {
             player.setYRot(intent.yaw);
         }
+
+        foodEater.maybeEat(player);
 
         broadcastPositionEvent(player);
         broadcastEntityEvents(player, level);
