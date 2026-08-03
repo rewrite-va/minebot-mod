@@ -11,6 +11,10 @@ base {
 
 repositories {
     mavenCentral()
+    maven {
+        name = "Terraformers"
+        url = "https://maven.terraformersmc.com/"
+    }
 }
 
 dependencies {
@@ -32,6 +36,12 @@ dependencies {
     // since it's already on the real runtime classpath) purely so the
     // compiler can see it.
     compileOnly 'com.google.code.gson:gson:2.10.1'
+
+    // Config screen, shown via the ModMenu mod-list button -- compileOnly
+    // since it's optional (declared as "suggests" not "depends" in
+    // fabric.mod.json): the mod works fine without ModMenu installed, it
+    // just has no in-game way to reach the config screen then.
+    compileOnly "com.terraformersmc:modmenu:${project.modmenu_version}"
 }
 
 processResources {

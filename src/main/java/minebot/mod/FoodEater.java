@@ -1,5 +1,6 @@
 package minebot.mod;
 
+import minebot.mod.config.Messages;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.component.DataComponents;
@@ -21,6 +22,14 @@ import net.minecraft.world.item.ItemStack;
 public final class FoodEater {
     private static final float LOW_HEALTH_FRACTION = 0.20f;
 
+    // Tracks whether the low-health chat lines have already been sent for
+    // the *current* low-health episode, so each fires (at most) once per
+    // episode instead of every tick for as long as health stays low, but
+    // fires again if health recovers above the threshold and later drops
+    // again.
+    private boolean announcedEating = false;
+    private boolean announcedNoFood = false;
+
     /**
      * Safe to call every tick -- isUsingItem() naturally makes this a
      * no-op while a previous call's eating animation is still playing, so
@@ -32,7 +41,15 @@ public final class FoodEater {
             return; // already chewing -- let it finish, don't restart/spam
         }
         if (player.getHealth() > player.getMaxHealth() * LOW_HEALTH_FRACTION) {
+            announcedEating = false;
+            announcedNoFood = false;
             return;
+        }
+
+        if (!announcedEating) {
+            announcedEating = true;
+            int hearts = Math.round(player.getHealth() / 2.0f);
+            sendChat(player, Messages.get("food_eater.eating", "hearts", hearts));
         }
 
         if (isEdible(player.getOffhandItem())) {
@@ -55,9 +72,18 @@ public final class FoodEater {
             Minecraft.getInstance().gameMode.useItem(player, InteractionHand.MAIN_HAND);
             return;
         }
+
+        if (!announcedNoFood) {
+            announcedNoFood = true;
+            sendChat(player, Messages.get("food_eater.no_food"));
+        }
     }
 
     private static boolean isEdible(final ItemStack stack) {
         return !stack.isEmpty() && stack.get(DataComponents.FOOD) != null;
+    }
+
+    private static void sendChat(final LocalPlayer player, final String text) {
+        player.connection.sendChat(text);
     }
 }
