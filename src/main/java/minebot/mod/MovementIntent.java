@@ -18,4 +18,5 @@ public final class MovementIntent {
     public boolean jump;
     public boolean sprint;
     public Float yaw; // degrees, vanilla convention; null = don't change look direction
+    public Float pitch; // degrees, vanilla convention (positive = looking down); null = don't change look direction
 }
