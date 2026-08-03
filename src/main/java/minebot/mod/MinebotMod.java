@@ -61,6 +61,7 @@ public final class MinebotMod implements ClientModInitializer {
     private final FoodEater foodEater = new FoodEater();
     private final InventoryReporter inventoryReporter = new InventoryReporter();
     private final RespawnHandler respawnHandler = new RespawnHandler(this::broadcastDeathEvent, this::broadcastRespawnEvent);
+    private final NearbyPlayerLookAt nearbyPlayerLookAt = new NearbyPlayerLookAt();
     private ControlClient controlClient;
     private float lastReportedHealth = -1;
 
@@ -130,6 +131,22 @@ public final class MinebotMod implements ClientModInitializer {
             player.input = new MinebotInput(new KeyboardInput(client.options));
         }
         ((MinebotInput) player.input).setIntent(intent);
+
+        // Only look at a nearby player when resolveMovementIntent didn't
+        // already set a look direction for this tick -- it only sets yaw
+        // while actively walking toward a pathfinding waypoint (yaw
+        // doubles as "which way to walk forward" then), so overriding it
+        // here would fight the pathfinding. Whenever there's no active
+        // walking yaw (idle, arrived, or a !goto/!follow target that
+        // isn't currently resolvable), glance at whoever's closest
+        // instead, independent of any goal.
+        if (intent.yaw == null) {
+            MovementIntent lookIntent = nearbyPlayerLookAt.resolve(player, level);
+            if (lookIntent != null) {
+                intent = lookIntent;
+            }
+        }
+
         if (intent.yaw != null) {
             player.setYRot(intent.yaw);
         }
@@ -211,20 +228,15 @@ public final class MinebotMod implements ClientModInitializer {
     private MovementIntent resolveMovementIntent(final LocalPlayer player, final ClientLevel level) {
         MovementIntent intent = new MovementIntent();
 
-        // followedEntity is kept as a live Entity (not just its
-        // coordinates) alongside the plain target[] used for movement, so
-        // the eye-level look-at branch below has the real entity to call
-        // getEyeY() on -- only FOLLOW/GIVE have an actual entity to look
-        // at; GOTO is a bare coordinate with nothing to aim eye level at.
-        Entity followedEntity = (controlState.mode == ControlState.Mode.FOLLOW || controlState.mode == ControlState.Mode.GIVE)
-            ? level.getEntity(controlState.followEntityId)
-            : null;
         Double[] target = switch (controlState.mode) {
             case IDLE -> null;
             case GOTO -> new Double[]{controlState.gotoX, controlState.gotoY, controlState.gotoZ};
-            case FOLLOW, GIVE -> followedEntity != null
-                ? new Double[]{followedEntity.getX(), followedEntity.getY(), followedEntity.getZ()}
-                : null;
+            case FOLLOW, GIVE -> {
+                Entity followed = level.getEntity(controlState.followEntityId);
+                yield followed != null
+                    ? new Double[]{followed.getX(), followed.getY(), followed.getZ()}
+                    : null;
+            }
         };
 
         if (target == null) {
@@ -259,32 +271,6 @@ public final class MinebotMod implements ClientModInitializer {
 
         if (horizontalDistance > distanceToStopAt) {
             intent.forward = true;
-        }
-
-        // Look direction: while still walking toward a waypoint (mid-path,
-        // not yet near the actual target), keep looking the way we're
-        // walking -- same as before. Once there's no waypoint left (i.e.
-        // close enough to the real target that pathfinding considers us
-        // arrived, per the same `waypoint == null` check `aimX/Y/Z` above
-        // already uses) and we have a live entity to look at, look
-        // directly at them -- yaw+pitch aimed at their eye level -- the
-        // way a real player standing near someone they're following
-        // would, rather than continuing to face wherever the last
-        // waypoint happened to be.
-        if (waypoint == null && followedEntity != null) {
-            double eyeDx = followedEntity.getX() - selfX;
-            double eyeDz = followedEntity.getZ() - selfZ;
-            double eyeDy = followedEntity.getEyeY() - player.getEyeY();
-            double eyeHorizontalDistance = Math.sqrt(eyeDx * eyeDx + eyeDz * eyeDz);
-
-            intent.yaw = (float) Math.toDegrees(Math.atan2(-eyeDx, eyeDz));
-            // calculateViewVector's own convention (confirmed via
-            // decompiled Entity.calculateViewVector): positive pitch =
-            // looking down, so a target ABOVE us (eyeDy > 0) needs a
-            // NEGATIVE pitch (look up) -- the leading minus sign here is
-            // not a typo.
-            intent.pitch = (float) -Math.toDegrees(Math.atan2(eyeDy, eyeHorizontalDistance));
-        } else if (horizontalDistance > distanceToStopAt) {
             // Vanilla yaw convention: 0 = south/+z, matching Entity.getYRot()
             // and the atan2(-dx, dz) form used throughout the decompiled
             // source's own movement code.
