@@ -137,7 +137,16 @@ public final class MinebotMod implements ClientModInitializer {
         maybeCompleteGive(player, level);
 
         respawnHandler.tick(player);
-        if (!player.isDeadOrDying()) {
+        if (player.isDeadOrDying()) {
+            // FoodEater isn't ticked while dead (no point trying to eat at
+            // 0 health), but it may have left the real `keyUse` keybind
+            // held down from the moment before death -- release it here
+            // so it doesn't stay stuck through death/respawn (which would
+            // either resume eating immediately regardless of the fresh
+            // post-respawn state, or leave a human retaking manual
+            // control later finding right-click stuck held).
+            foodEater.releaseUseKeyIfHeld();
+        } else {
             foodEater.maybeEat(player);
         }
 

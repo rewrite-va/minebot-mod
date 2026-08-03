@@ -5,53 +5,42 @@ import minebot.mod.util.EdgeTrigger;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.component.DataComponents;
-import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.food.FoodProperties;
 import net.minecraft.world.item.ItemStack;
 
 /**
  * Eats food from the bot's own inventory once health drops to 20% or
- * below, the same way a real player would -- selects a food item into the
- * hotbar if needed and sends a real MultiPlayerGameMode.useItem interaction
- * (the same client API DoorOpener uses for useItemOn), not a direct
- * world/inventory-state mutation.
+ * below, the same way a real player would.
  *
  * "Is this food" is a data-component check (DataComponents.FOOD), not the
  * older Item.getFoodProperties() method, which no longer exists in this
  * version -- confirmed via decompiled ItemStack/DataComponentHolder.
  *
  * IMPORTANT gating subtlety (found via decompiled Player/Consumable
- * source, net/minecraft/world/entity/player/Player.java and
- * net/minecraft/world/item/component/Consumable.java): calling
- * gameMode.useItem() on a food item does NOT unconditionally start eating.
- * Item.use() for a food item delegates to Consumable.startConsuming(),
- * which first calls Consumable.canConsume() ->
- * Player.canEat(foodProperties.canAlwaysEat()), and:
+ * source): eating is gated on HUNGER, not health -- Player.canEat(canAlwaysEat)
+ * == invulnerable || canAlwaysEat || foodData.needsFood() (foodLevel < 20).
+ * A bot at critical health with a still-full hunger bar can't eat normal
+ * food at all; only canAlwaysEat food (golden apple/carrot) bypasses that.
+ * This mirrors that gate client-side before trying to eat, both to prefer
+ * a canAlwaysEat item and to report the real reason ("hunger full") rather
+ * than silently failing.
  *
- *     canEat(canAlwaysEat) == invulnerable || canAlwaysEat || foodData.needsFood()
- *     foodData.needsFood() == foodLevel < 20
- *
- * Health and hunger are separate bars. A bot that took combat damage can be
- * at critical health while its hunger bar is still full (foodLevel == 20).
- * In that state canEat(false) is false for every normal food item, so
- * startConsuming() returns InteractionResult.FAIL, startUsingItem() is
- * never called, and useItem() is a silent no-op -- forever, no matter how
- * many times per tick it's called or how low health gets. The only food
- * that still works in that state is one whose FoodProperties.canAlwaysEat()
- * is true (golden apple, golden carrot, etc.), since that short-circuits
- * the hunger check entirely.
- *
- * So this class now mirrors that same gate client-side (via the public
- * Player.canEat()) before calling useItem(), for two reasons: (1) prefer a
- * canAlwaysEat item first, since that's the only kind of food that can
- * actually save a bot that's dying with a full stomach; (2) avoid calling
- * useItem() at all when nothing in inventory is currently eatable per
- * canEat() -- that call would just be rejected every tick with no
- * progress, which is both wasted work and the "spams right-click and never
- * actually eats" symptom that was observed live. When that happens we
- * report it distinctly from "no food" (food_eater.hunger_full), since the
- * bot does have food -- vanilla's own hunger rules are what's blocking it.
+ * HOW THIS ACTUALLY TRIGGERS EATING (found only after an extensive live
+ * investigation -- see FINDINGS.md for the full story): calling
+ * MultiPlayerGameMode.useItem() directly, the way DoorOpener does for its
+ * instant block interaction, does NOT work for eating specifically, even
+ * though every vanilla mechanism involved (canEat gating, hotbar
+ * selection, call rate, the client/server synced "using item" flag) was
+ * individually confirmed correct via bytecode. A live test proved the
+ * actual difference: a human manually holding right-click on the SAME
+ * client/account/item ate normally, while the mod's direct useItem() call
+ * on the identical setup never completed a single eat. So instead of
+ * calling useItem() at all, this holds the real `keyUse` keybind down
+ * (Options.keyUse.setDown(true)) -- vanilla's own per-tick
+ * Minecraft.handleKeybinds() then drives the interaction exactly as it
+ * would for a human physically holding the button, which is confirmed to
+ * work where the programmatic call didn't.
  */
 public final class FoodEater {
     private static final float LOW_HEALTH_FRACTION = 0.20f;
@@ -68,17 +57,13 @@ public final class FoodEater {
     private final EdgeTrigger noFoodWhileLow = new EdgeTrigger();
     private final EdgeTrigger hungerBlockedWhileLow = new EdgeTrigger();
 
-    /**
-     * Safe to call every tick -- isUsingItem() naturally makes this a
-     * no-op while a previous call's eating animation is still playing, so
-     * there's no separate throttle needed the way DoorOpener needs one
-     * for its instant (non-animated) interaction.
-     */
-    public void maybeEat(final LocalPlayer player) {
-        if (player.isUsingItem()) {
-            return; // already chewing -- let it finish, don't restart/spam
-        }
+    /** Releases the use key if it happens to be held -- see MinebotMod's death-tick handling for why this needs to be reachable even when maybeEat itself isn't being called. */
+    public void releaseUseKeyIfHeld() {
+        releaseUseKey();
+    }
 
+    /** Safe to call every tick. */
+    public void maybeEat(final LocalPlayer player) {
         boolean isLowHealth = player.getHealth() <= player.getMaxHealth() * LOW_HEALTH_FRACTION;
         if (lowHealth.fire(isLowHealth)) {
             // One decimal place, not Math.round -- health is reported in
@@ -94,15 +79,16 @@ public final class FoodEater {
         if (!isLowHealth) {
             noFoodWhileLow.reset(); // arm it to fire again on the next low-health episode
             hungerBlockedWhileLow.reset();
+            releaseUseKey();
             return;
         }
 
         // Prefer the offhand if it's edible AND actually eatable right
-        // now (see class doc) -- a canAlwaysEat item there beats hunting
-        // through the main inventory.
+        // now -- a canAlwaysEat item there beats hunting through the
+        // main inventory, and needs no hotbar selection at all.
         if (isEatableNow(player, player.getOffhandItem())) {
             hungerBlockedWhileLow.reset();
-            Minecraft.getInstance().gameMode.useItem(player, InteractionHand.OFF_HAND);
+            holdUseKey();
             return;
         }
 
@@ -122,17 +108,17 @@ public final class FoodEater {
 
             hungerBlockedWhileLow.reset();
             selectSlot(inventory, slot);
-            Minecraft.getInstance().gameMode.useItem(player, InteractionHand.MAIN_HAND);
+            holdUseKey();
             return;
         }
 
+        releaseUseKey();
+
         if (fallbackEdibleSlot >= 0) {
             // There IS food, but canEat() would reject every bit of it
-            // right now (normal food + full hunger bar). Calling
-            // useItem() here would be rejected every tick with zero
-            // progress -- that's the "spams right-click and never
-            // actually eats" symptom, so don't call it; just report the
-            // real reason once per episode instead.
+            // right now (normal food + full hunger bar) -- report the
+            // real reason once per episode instead of holding the use
+            // key against food that can't actually be eaten.
             if (hungerBlockedWhileLow.fire(true)) {
                 sendChat(player, Messages.get("food_eater.hunger_full"));
             }
@@ -144,9 +130,27 @@ public final class FoodEater {
         }
     }
 
+    /**
+     * Holds the real `keyUse` keybind down -- Minecraft.handleKeybinds()
+     * (called every client tick regardless of this mod) reads this every
+     * tick on its own and drives the actual eat interaction from it,
+     * confirmed to work where a direct useItem() call didn't. Idempotent
+     * to call every tick while eating should continue.
+     */
+    private static void holdUseKey() {
+        Minecraft.getInstance().options.keyUse.setDown(true);
+    }
+
+    /** Releases the use key -- must be called once health/food state no longer calls for eating, or a human retaking real control would find it stuck held. */
+    private static void releaseUseKey() {
+        Minecraft.getInstance().options.keyUse.setDown(false);
+    }
+
     private static void selectSlot(final Inventory inventory, final int slot) {
         if (Inventory.isHotbarSlot(slot)) {
-            inventory.setSelectedSlot(slot); // synced to the server automatically next tick
+            if (inventory.getSelectedSlot() != slot) {
+                inventory.setSelectedSlot(slot); // synced to the server automatically next tick
+            }
         } else {
             inventory.pickSlot(slot); // swaps this main-inventory item into the current hotbar slot
         }
@@ -157,11 +161,11 @@ public final class FoodEater {
     }
 
     /**
-     * True only if calling useItem() on this stack right now would
-     * actually start eating, per the real vanilla gate: Consumable's
-     * startConsuming() -> canConsume() -> Player.canEat(canAlwaysEat).
-     * Mirroring canEat() itself (rather than re-deriving invulnerable/
-     * hunger state by hand) keeps this correct if that logic ever changes.
+     * True only if starting to eat this stack right now would actually
+     * succeed, per the real vanilla gate: Consumable's startConsuming()
+     * -> canConsume() -> Player.canEat(canAlwaysEat). Mirroring canEat()
+     * itself (rather than re-deriving invulnerable/hunger state by hand)
+     * keeps this correct if that logic ever changes.
      */
     private static boolean isEatableNow(final LocalPlayer player, final ItemStack stack) {
         if (!isEdible(stack)) {
