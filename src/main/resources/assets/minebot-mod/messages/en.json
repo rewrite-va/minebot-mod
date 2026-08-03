@@ -1,4 +1,5 @@
 {
   "food_eater.eating": "I have {hearts} hearts!, eating...",
-  "food_eater.no_food": "oh, I have no food! aaaa"
+  "food_eater.no_food": "oh, I have no food! aaaa",
+  "food_eater.hunger_full": "I have food but I'm not hungry, so I can't eat it! I need a golden apple or something like that"
 }
