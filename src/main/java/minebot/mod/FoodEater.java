@@ -1,6 +1,7 @@
 package minebot.mod;
 
 import minebot.mod.config.Messages;
+import minebot.mod.util.EdgeTrigger;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.component.DataComponents;
@@ -22,13 +23,15 @@ import net.minecraft.world.item.ItemStack;
 public final class FoodEater {
     private static final float LOW_HEALTH_FRACTION = 0.20f;
 
-    // Tracks whether the low-health chat lines have already been sent for
-    // the *current* low-health episode, so each fires (at most) once per
-    // episode instead of every tick for as long as health stays low, but
-    // fires again if health recovers above the threshold and later drops
-    // again.
-    private boolean announcedEating = false;
-    private boolean announcedNoFood = false;
+    // Each fires once on the tick health first drops to/below the
+    // threshold (the "eating" line) or once per such episode if that tick
+    // (or a later one in the same episode) finds no edible item (the
+    // "no food" line) -- both keyed off the same low-health condition, so
+    // recovering above the threshold resets both and arms them to fire
+    // again on the next drop. See EdgeTrigger's docstring for why this
+    // isn't just a couple of hand-rolled booleans.
+    private final EdgeTrigger lowHealth = new EdgeTrigger();
+    private final EdgeTrigger noFoodWhileLow = new EdgeTrigger();
 
     /**
      * Safe to call every tick -- isUsingItem() naturally makes this a
@@ -40,16 +43,15 @@ public final class FoodEater {
         if (player.isUsingItem()) {
             return; // already chewing -- let it finish, don't restart/spam
         }
-        if (player.getHealth() > player.getMaxHealth() * LOW_HEALTH_FRACTION) {
-            announcedEating = false;
-            announcedNoFood = false;
-            return;
-        }
 
-        if (!announcedEating) {
-            announcedEating = true;
+        boolean isLowHealth = player.getHealth() <= player.getMaxHealth() * LOW_HEALTH_FRACTION;
+        if (lowHealth.fire(isLowHealth)) {
             int hearts = Math.round(player.getHealth() / 2.0f);
             sendChat(player, Messages.get("food_eater.eating", "hearts", hearts));
+        }
+        if (!isLowHealth) {
+            noFoodWhileLow.reset(); // arm it to fire again on the next low-health episode
+            return;
         }
 
         if (isEdible(player.getOffhandItem())) {
@@ -73,8 +75,7 @@ public final class FoodEater {
             return;
         }
 
-        if (!announcedNoFood) {
-            announcedNoFood = true;
+        if (noFoodWhileLow.fire(true)) {
             sendChat(player, Messages.get("food_eater.no_food"));
         }
     }
