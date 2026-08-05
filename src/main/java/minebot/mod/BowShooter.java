@@ -187,7 +187,14 @@ public final class BowShooter {
         ItemStack bow = player.getMainHandItem();
         if (bow.getItem() instanceof BowItem bowItem) {
             int timeLeft = bowItem.getUseDuration(bow, player) - ticksHeld;
-            bowItem.releaseUsing(bow, player.level(), player, timeLeft);
+            ItemStack projectile = player.getProjectile(bow);
+            boolean fired = bowItem.releaseUsing(bow, player.level(), player, timeLeft);
+            MinebotMod.LOGGER.info(
+                "bow: release() -- ticksHeld={} timeLeft={} projectile={} power={} fired={}",
+                ticksHeld, timeLeft, projectile, BowItem.getPowerForTime(bowItem.getUseDuration(bow, player) - timeLeft), fired
+            );
+        } else {
+            MinebotMod.LOGGER.warn("bow: release() -- main hand is no longer a bow ({})", bow.getItem());
         }
     }
 
