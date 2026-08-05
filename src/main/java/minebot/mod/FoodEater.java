@@ -57,6 +57,20 @@ public final class FoodEater {
     private final EdgeTrigger noFoodWhileLow = new EdgeTrigger();
     private final EdgeTrigger hungerBlockedWhileLow = new EdgeTrigger();
 
+    // Tracks whether THIS class is the one currently holding keyUse down
+    // -- confirmed live to matter: BowShooter also holds the same real
+    // keyUse keybind for its own draw (see its own docstring for why),
+    // and this used to call Options.keyUse.setDown(false) unconditionally
+    // every single tick it wasn't actively eating, silently stomping a
+    // bow draw BowShooter had started the same tick (BowShooter sets it
+    // true, then this ran right after and set it right back to false,
+    // every tick) -- vanilla's own Minecraft.handleKeybinds() then force-
+    // released the draw next tick seeing keyUse.isDown() == false, the
+    // exact same underlying mechanism the whole bow investigation
+    // eventually traced back to, just one layer removed. Only release
+    // what this class itself set.
+    private boolean holdingUseKey;
+
     /** Releases the use key if it happens to be held -- see MinebotMod's death-tick handling for why this needs to be reachable even when maybeEat itself isn't being called. */
     public void releaseUseKeyIfHeld() {
         releaseUseKey();
@@ -147,12 +161,26 @@ public final class FoodEater {
      * confirmed to work where a direct useItem() call didn't. Idempotent
      * to call every tick while eating should continue.
      */
-    private static void holdUseKey() {
+    private void holdUseKey() {
+        holdingUseKey = true;
         Minecraft.getInstance().options.keyUse.setDown(true);
     }
 
-    /** Releases the use key -- must be called once health/food state no longer calls for eating, or a human retaking real control would find it stuck held. */
-    private static void releaseUseKey() {
+    /**
+     * Releases the use key -- must be called once health/food state no
+     * longer calls for eating, or a human retaking real control would
+     * find it stuck held. Only actually touches the real keybind if THIS
+     * class is the one that last set it (see holdingUseKey's own
+     * docstring) -- otherwise a tick where FoodEater has nothing to eat
+     * would unconditionally force keyUse false regardless of what else
+     * (e.g. BowShooter, mid-draw) might legitimately be holding it down
+     * that same tick.
+     */
+    private void releaseUseKey() {
+        if (!holdingUseKey) {
+            return;
+        }
+        holdingUseKey = false;
         Minecraft.getInstance().options.keyUse.setDown(false);
     }
 
