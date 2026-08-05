@@ -13,12 +13,15 @@ import java.util.Map;
  * (calling onExit/onEnter as the transition happens), then publishes its
  * (possibly just-changed) current state to the shared Blackboard.
  *
- * Every real transition is logged here, once, at the transition site --
- * not left for individual nodes' onEnter to each remember to log
- * themselves (same reasoning as the SharedResourceArbiter's
- * reapAbandonedOwnership() safety net in STATE_MACHINE.md: a
- * per-node-remembers-to-do-it convention is exactly the kind of thing
- * that silently doesn't happen somewhere and is hard to notice).
+ * Every state entry is logged here, as part of entering it (see the
+ * private enter() helper -- the log happens immediately before the
+ * node's own onEnter runs, so it's genuinely part of "entering", not a
+ * separate step bolted on alongside it) -- not left for individual
+ * nodes' onEnter to each remember to log themselves (same reasoning as
+ * the SharedResourceArbiter's reapAbandonedOwnership() safety net in
+ * STATE_MACHINE.md: a per-node-remembers-to-do-it convention is exactly
+ * the kind of thing that silently doesn't happen somewhere and is hard
+ * to notice).
  *
  * Not thread-safe -- only ever touched from the client tick thread, same
  * as every other piece of per-tick mod state (ControlState, EdgeTrigger,
@@ -59,7 +62,7 @@ public final class StateMachine<S extends Enum<S>> {
     public void tick(final TickContext ctx) {
         if (!started) {
             started = true;
-            nodeFor(currentState).onEnter(ctx);
+            enter(currentState, ctx);
         }
 
         nodeFor(currentState).onTick(ctx);
@@ -67,15 +70,19 @@ public final class StateMachine<S extends Enum<S>> {
         for (Edge<S> edge : edgesByFromState.getOrDefault(currentState, List.of())) {
             if (edge.condition().test(ctx)) {
                 nodeFor(currentState).onExit(ctx);
-                S previousState = currentState;
                 currentState = edge.to();
-                MinebotMod.LOGGER.info("{}: {} -> {}", name, previousState, currentState);
-                nodeFor(currentState).onEnter(ctx);
+                enter(currentState, ctx);
                 break; // first matching edge wins, per STATE_MACHINE.md -- not evaluating the rest against the new state until next tick
             }
         }
 
         ctx.blackboard.publish(this, currentState);
+    }
+
+    /** The single place a state is ever entered -- logs, THEN calls the node's own onEnter, so the log line is genuinely part of "entering", not a separate step alongside it. */
+    private void enter(final S state, final TickContext ctx) {
+        MinebotMod.LOGGER.info("{}: entering {}", name, state);
+        nodeFor(state).onEnter(ctx);
     }
 
     private StateNode nodeFor(final S state) {
