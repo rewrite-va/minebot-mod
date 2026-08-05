@@ -10,7 +10,7 @@ import net.minecraft.world.food.FoodProperties;
 import net.minecraft.world.item.ItemStack;
 
 /**
- * Eats food from the bot's own inventory once health drops to 20% or
+ * Eats food from the bot's own inventory once health drops to 80% or
  * below, the same way a real player would.
  *
  * "Is this food" is a data-component check (DataComponents.FOOD), not the
@@ -43,7 +43,7 @@ import net.minecraft.world.item.ItemStack;
  * work where the programmatic call didn't.
  */
 public final class FoodEater {
-    private static final float LOW_HEALTH_FRACTION = 0.20f;
+    private static final float LOW_HEALTH_FRACTION = 0.80f;
 
     // Each fires once on the tick health first drops to/below the
     // threshold (the "eating" line) or once per such episode if that tick
