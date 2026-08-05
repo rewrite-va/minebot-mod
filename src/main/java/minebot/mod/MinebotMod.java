@@ -263,7 +263,21 @@ public final class MinebotMod implements ClientModInitializer {
             // stale local state through respawn.
             bowShooter.stop(player);
         } else {
-            foodEater.maybeEat(player);
+            // Temporarily disabled -- root-caused live (see git history)
+            // that FoodEater.maybeEat() holding the real keyUse keybind
+            // down every tick it has food to eat (unconditionally,
+            // regardless of ControlState.mode) was silently fighting
+            // over that same real keybind with BowShooter's draw calls,
+            // and even with a human's own manual right-click, since
+            // nothing in this mod currently arbitrates "who owns keyUse
+            // this tick" between independent systems that can each want
+            // it at once. Confirmed live: removing minebot-mod entirely
+            // let manual bow-draw work normally again, isolating the
+            // conflict to something in this mod, not the server/account.
+            // Re-enable once there's a real single-owner arbitrator for
+            // shared input state (keyUse/keyAttack) across FoodEater/
+            // BlockBreaker/BowShooter -- see PENDING.md.
+            // foodEater.maybeEat(player);
         }
 
         maybeBroadcastPositionEvent(player);
