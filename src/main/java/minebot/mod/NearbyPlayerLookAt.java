@@ -5,18 +5,21 @@ import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.world.entity.player.Player;
 
 /**
- * Looks at the closest nearby player's eye level, independent of any
- * movement goal -- a bot standing idle, walking a !goto path, or
- * following someone else entirely still glances at whoever's actually
- * close by, the way a real player naturally would, rather than only ever
- * looking at a FOLLOW/GIVE target specifically.
+ * Looks at the closest nearby player's eye level -- a bot standing
+ * genuinely idle (ControlState.Mode.IDLE, no goal at all) glances at
+ * whoever's actually close by, the way a real player naturally would.
  *
- * Deliberately only applied when resolveMovementIntent didn't already set
- * a yaw for this tick (i.e. not actively walking toward a pathfinding
- * waypoint) -- see MinebotMod.onClientTick's call site. Overriding
- * mid-path walking yaw with a look-at-nearby-player yaw would fight the
- * pathfinding, since yaw doubles as "which way to walk forward" while a
- * waypoint is active.
+ * Only applied while ControlState.mode is IDLE -- see MinebotMod.
+ * onClientTick's call site. Originally gated on resolveMovementIntent
+ * not having set a yaw this tick (i.e. not actively walking toward a
+ * pathfinding waypoint), but that check alone wasn't sufficient: found
+ * live that BlockBreaker.aimAt sets yaw/pitch directly on the player
+ * (not through MovementIntent) while mining, so a nearby player would
+ * still steal the look direction away from the block being mined the
+ * instant they got close -- slowing mining down, since real destroy
+ * progress only accumulates on ticks actually spent looking at (and
+ * swinging at) the target. Gating on the mode itself instead of the
+ * yaw-was-set signal covers every goal uniformly, mining included.
  */
 public final class NearbyPlayerLookAt {
     private static final double RANGE = 8.0;

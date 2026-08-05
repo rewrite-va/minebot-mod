@@ -76,6 +76,18 @@ public final class ControlClient {
     public void sendEvent(final String json) {
         Client current = client;
         if (current != null && current.isOpen()) {
+            // Wire-level logging, mod -> Python direction. At `info` (not
+            // `debug`) since this client's default log4j config filters
+            // debug output entirely -- no LOGGER.debug line from this mod
+            // has ever actually appeared in a real log (confirmed
+            // elsewhere in this codebase, e.g. BlockBreaker's tool-switch
+            // logging). Added to debug a live report of stone not
+            // dropping cobblestone when mined via !collect -- having the
+            // exact commands/events on both sides of the socket, in order,
+            // is the fastest way to tell "the mod never asked for/reported
+            // X" apart from "X happened but something downstream ignored
+            // it" without guessing from decompiled source alone.
+            MinebotMod.LOGGER.info("wire >> {}", json);
             current.send(json);
         }
     }
@@ -123,6 +135,11 @@ public final class ControlClient {
 
         @Override
         public void onMessage(final String message) {
+            // Wire-level logging, Python -> mod direction -- see sendEvent's
+            // own comment for why this is at `info`. Logged before dispatch
+            // (not inside MinebotMod.handleMessage) so a message that fails
+            // to even parse as JSON still gets recorded here first.
+            MinebotMod.LOGGER.info("wire << {}", message);
             onMessage.accept(message);
         }
 

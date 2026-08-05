@@ -107,7 +107,17 @@ public final class FoodEater {
             }
 
             hungerBlockedWhileLow.reset();
-            selectSlot(inventory, slot);
+            // Delegates to InventoryActions.moveToHotbar's own hotbar
+            // slot 8 (arbitrary but consistent -- same slot BlockBreaker's
+            // own tool-switch reuses) rather than duplicating its swap
+            // logic here -- this method used to do its own direct
+            // getItem/setItem swap for the main-storage case, the exact
+            // same bug class (see moveToHotbar's own docstring) confirmed
+            // live to genuinely desync the server's view of the held item
+            // from what other clients actually see, not just a redundant
+            // local mutation. moveToHotbar's current implementation is a
+            // real container-click swap for that case.
+            InventoryActions.moveToHotbar(player, slot, Inventory.isHotbarSlot(slot) ? slot : 8);
             holdUseKey();
             return;
         }
@@ -144,16 +154,6 @@ public final class FoodEater {
     /** Releases the use key -- must be called once health/food state no longer calls for eating, or a human retaking real control would find it stuck held. */
     private static void releaseUseKey() {
         Minecraft.getInstance().options.keyUse.setDown(false);
-    }
-
-    private static void selectSlot(final Inventory inventory, final int slot) {
-        if (Inventory.isHotbarSlot(slot)) {
-            if (inventory.getSelectedSlot() != slot) {
-                inventory.setSelectedSlot(slot); // synced to the server automatically next tick
-            }
-        } else {
-            inventory.pickSlot(slot); // swaps this main-inventory item into the current hotbar slot
-        }
     }
 
     private static boolean isEdible(final ItemStack stack) {

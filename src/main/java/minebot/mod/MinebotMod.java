@@ -1,5 +1,6 @@
 package minebot.mod;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import net.fabricmc.api.ClientModInitializer;
@@ -16,15 +17,22 @@ import minebot.mod.pathfinding.Move;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -69,15 +77,19 @@ public final class MinebotMod implements ClientModInitializer {
     private final BlockBreaker pathBlockBreaker = new BlockBreaker("pathfinding");
     // Separate BlockBreaker instances per mode -- each tracks its own
     // single in-progress break (see BlockBreaker's own docstring), and
-    // DIG_DOWN/pathfinding-through-a-wall can each have a different
-    // target block in play, so sharing one instance across modes would
-    // make one mode's break silently reset another's in-progress
-    // progress the moment they targeted different blocks. Each is
-    // labeled (see BlockBreaker's own constructor) so its debug logging
-    // identifies which one produced a given line.
+    // DIG_DOWN/COLLECT/pathfinding-through-a-wall can each have a
+    // different target block in play, so sharing one instance across
+    // modes would make one mode's break silently reset another's
+    // in-progress progress the moment they targeted different blocks.
+    // Each is labeled (see BlockBreaker's own constructor) so its debug
+    // logging identifies which one produced a given line -- added
+    // chasing a live report that looked like two different breakers were
+    // fighting over the same block during !collect.
     private final BlockBreaker digDownBreaker = new BlockBreaker("digDown");
+    private final BlockBreaker collectBreaker = new BlockBreaker("collect");
     private final FoodEater foodEater = new FoodEater();
     private final InventoryReporter inventoryReporter = new InventoryReporter();
+    private final ItemDropTracker itemDropTracker = new ItemDropTracker();
     private final RespawnHandler respawnHandler = new RespawnHandler(this::broadcastDeathEvent, this::broadcastRespawnEvent);
     private final NearbyPlayerLookAt nearbyPlayerLookAt = new NearbyPlayerLookAt();
     private ControlClient controlClient;
@@ -89,7 +101,7 @@ public final class MinebotMod implements ClientModInitializer {
         controlClient.start();
         new StatusHud(controlClient).register();
         new PathVisualizer(controlState.pathTracker).register();
-        new BlockTargetVisualizer(pathBlockBreaker, digDownBreaker).register();
+        new BlockTargetVisualizer(pathBlockBreaker, digDownBreaker, collectBreaker).register();
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onClientTick);
 
@@ -166,7 +178,7 @@ public final class MinebotMod implements ClientModInitializer {
         // ticks actually spent looking at (and swinging at) the target.
         // ControlState.mode is the actual "is there a current goal"
         // signal -- IDLE is the only mode with nothing at all in
-        // progress (GOTO/FOLLOW/GIVE/DIG_DOWN all have a real goal,
+        // progress (GOTO/FOLLOW/GIVE/DIG_DOWN/COLLECT all have a real goal,
         // whether or not it happens to be setting yaw via MovementIntent
         // this specific tick).
         if (intent.yaw == null && controlState.mode == ControlState.Mode.IDLE) {
@@ -185,6 +197,7 @@ public final class MinebotMod implements ClientModInitializer {
 
         maybeCompleteGive(player, level);
         tickDigDown(player, level);
+        tickCollect(player, level);
 
         respawnHandler.tick(player);
         if (player.isDeadOrDying()) {
@@ -209,6 +222,7 @@ public final class MinebotMod implements ClientModInitializer {
         broadcastPositionEvent(player);
         broadcastEntityEvents(player, level);
         inventoryReporter.maybeBroadcast(player.getInventory(), controlClient);
+        itemDropTracker.tick(level, controlClient);
 
         float health = player.getHealth();
         if (health != lastReportedHealth) {
@@ -344,6 +358,398 @@ public final class MinebotMod implements ClientModInitializer {
     }
 
     /**
+     * !collect: a single attempt to find the nearest match for
+     * collectQuery (entity type tried first, block type as fallback --
+     * resolveNearest, same order !find uses), walk to it via the normal
+     * GOTO-style pathfinding (resolveMovementIntent's COLLECT case reads
+     * gotoX/Y/Z or followEntityId depending on collectTargetIsEntity),
+     * then either mine it (BlockBreaker) or fight it (repeated
+     * MultiPlayerGameMode.attack calls) once in range -- one item, then
+     * back to IDLE, reporting collect_result either way. Deliberately not
+     * a counted loop anymore (it used to repeat internally against a
+     * requested count) -- collecting N is now the Python backend's job:
+     * MiningController.collect sends N separate one-item `collect`
+     * commands, watching real inventory-gain events between each to
+     * confirm one actually landed before asking for the next. Moving
+     * that bookkeeping to Python is what makes each individual collect
+     * attempt small and atomic enough to interrupt cleanly (a new chat
+     * command can supersede "walking to this one block" far more
+     * responsively than it could ever interrupt "the 6th of 10 total").
+     */
+    private static final double COLLECT_MELEE_RANGE = 3.0;
+    // How many ticks (10s at 20 ticks/sec) a single target gets before
+    // tickCollect gives up on it and tries the next-nearest match
+    // instead -- generous enough that legitimately walking there (even
+    // across a large map via pathfinding) never trips it, but bounded so
+    // a target that can never actually be reached (see BlockBreaker's
+    // line-of-sight check -- a block found by BlockFinder's pure
+    // distance scan can be on the far side of a wall from wherever the
+    // bot ends up standing, with no angle that ever makes it visible)
+    // doesn't strand this attempt forever on one impossible candidate.
+    private static final int COLLECT_TARGET_TIMEOUT_TICKS = 200;
+    // How many ticks the pickup-walk phase gets before giving up and
+    // completing the attempt anyway -- see ControlState.
+    // collectPickupStuckTicks's own docstring for why this exists
+    // (bounding a drop that rolled somewhere genuinely unreachable) and
+    // why "give up" here still means "report success", not failure: the
+    // block/entity really was destroyed/killed either way, this phase
+    // only ever tries to *also* physically collect the result, it was
+    // never the thing that decided success/failure in the first place
+    // (Python's own drop-confirmation, watching real inventory counts,
+    // already owns that decision -- see MiningController.collect).
+    // Shorter than COLLECT_TARGET_TIMEOUT_TICKS (10s) since a real drop
+    // sitting in melee range should be reachable in well under that.
+    private static final int COLLECT_PICKUP_TIMEOUT_TICKS = 100;
+    // How far (blocks) to search for the dropped item(s) DropTable says
+    // this collect's target should have produced -- generous enough to
+    // cover a drop that rolled/bounced a little from where the block/
+    // entity was, tight enough that this doesn't accidentally walk the
+    // bot toward an unrelated item of the same type sitting somewhere
+    // else on the map.
+    private static final double COLLECT_PICKUP_SEARCH_RADIUS = 6.0;
+
+    private void tickCollect(final LocalPlayer player, final ClientLevel level) {
+        if (controlState.mode != ControlState.Mode.COLLECT) {
+            return;
+        }
+
+        if (controlState.collectPickingUp) {
+            tickCollectPickup(player, level);
+            return;
+        }
+
+        if (!controlState.collectHasTarget) {
+            NearestMatch match = resolveNearest(
+                level, player, controlState.collectQuery, controlState.collectRadius, controlState.collectExcludedPositions
+            );
+            if (match == null) {
+                String query = controlState.collectQuery;
+                controlState.clear();
+                broadcastCollectResultEvent(false, query, "no more " + query + " found nearby");
+                return;
+            }
+            controlState.collectTargetIsEntity = match.entity != null;
+            if (match.entity != null) {
+                controlState.followEntityId = match.entity.getId();
+            } else {
+                controlState.gotoX = match.x;
+                controlState.gotoY = match.y;
+                controlState.gotoZ = match.z;
+            }
+            controlState.collectHasTarget = true;
+            controlState.collectTargetStuckTicks = 0;
+            controlState.pathTracker.reset();
+            LOGGER.info(
+                "collect: new target -- kind={} at ({}, {}, {}), excluded so far: {}",
+                match.kind, match.x, match.y, match.z, controlState.collectExcludedPositions
+            );
+            return; // resolveMovementIntent picks up the fresh target next tick
+        }
+
+        BlockPos blockTargetPos = controlState.collectTargetIsEntity ? null : new BlockPos(
+            (int) Math.floor(controlState.gotoX), (int) Math.floor(controlState.gotoY), (int) Math.floor(controlState.gotoZ)
+        );
+
+        boolean collectedThisTick;
+        if (controlState.collectTargetIsEntity) {
+            collectedThisTick = tickCollectEntity(player, level);
+        } else {
+            // tickSettle every tick regardless of which branch below
+            // actually runs, so a settle window started by an earlier
+            // tick's break actually counts down. While still settling,
+            // deliberately skip tickCollectBlock's own live-block-state
+            // check entirely -- checking justFinishedSettling(pos)
+            // instead of re-deriving completion from level.getBlockState
+            // is what lets this tell "my own break just finished
+            // settling" apart from "something else made this position
+            // air" once the window elapses; re-entering tickCollectBlock
+            // itself right as/after settling would otherwise see the
+            // (correctly, now-air) target and take its "something else
+            // must have removed this" abandonment branch instead --
+            // misclassifying a real success as an abandoned target,
+            // excluding its own just-broken position, and never reporting
+            // completion at all. See BlockBreaker.isBusy's own docstring
+            // for why treating a break's client-predicted completion as
+            // immediately final (the old behavior here, before any settle
+            // window existed) is unsafe in the first place: !collect was
+            // reporting collect_result success and clearing back to IDLE
+            // the instant a block visually disappeared, well before any
+            // server-side confirmation or drop could plausibly have
+            // landed.
+            collectBreaker.tickSettle(level);
+            // Only skip calling tickCollectBlock (which calls tryBreak)
+            // while purely settling with no active target -- gating this
+            // on isBusy() alone (the old check here) deadlocked forever
+            // the moment a tool switch made tryBreak return false without
+            // completing anything (see BlockBreaker.hasActiveTarget's own
+            // docstring for the live repro that found this class of bug,
+            // in !debug and !dig): isBusy() was already true from that
+            // point on, so this would never call tryBreak again and the
+            // target could never actually be mined.
+            if (!collectBreaker.hasActiveTarget() && collectBreaker.isBusy()) {
+                collectedThisTick = false;
+            } else if (collectBreaker.justFinishedSettling(blockTargetPos)) {
+                collectedThisTick = true;
+            } else {
+                collectedThisTick = tickCollectBlock(player, level);
+            }
+        }
+
+        if (!collectedThisTick) {
+            // Still gated behind collectHasTarget -- tickCollectBlock's
+            // own already-air guard already clears that flag and returns
+            // early in the "target vanished" case, so this only counts
+            // real "tried and made no progress" ticks (out of range,
+            // obstructed, still walking there, mid-break, ...).
+            if (controlState.collectHasTarget && ++controlState.collectTargetStuckTicks > COLLECT_TARGET_TIMEOUT_TICKS) {
+                LOGGER.warn(
+                    "collect: giving up on unreachable target after {} ticks (query={})",
+                    controlState.collectTargetStuckTicks, controlState.collectQuery
+                );
+                collectBreaker.stopBreaking();
+                if (!controlState.collectTargetIsEntity) {
+                    // Entities move, so excluding a position for them
+                    // doesn't mean anything -- only block targets are
+                    // fixed enough for "don't find this exact position
+                    // again" to be the right exclusion.
+                    controlState.collectExcludedPositions.add(new BlockPos(
+                        (int) Math.floor(controlState.gotoX), (int) Math.floor(controlState.gotoY), (int) Math.floor(controlState.gotoZ)
+                    ));
+                }
+                controlState.collectHasTarget = false;
+                // Deliberately not clearing back to IDLE here -- the
+                // next tick's !controlState.collectHasTarget branch
+                // above will search again (now with this position
+                // excluded) and try the next-nearest candidate, same
+                // "one attempt can retry several candidates" behavior
+                // this had before, just without a count driving it.
+            }
+            return;
+        }
+
+        String kind = controlState.collectTargetIsEntity ? "entity" : "block";
+        Vec3 destroyedAt = controlState.collectTargetIsEntity
+            ? player.position() // the entity is gone by now -- search from the bot's own position instead
+            : new Vec3(controlState.gotoX, controlState.gotoY, controlState.gotoZ);
+        collectBreaker.stopBreaking();
+        LOGGER.info(
+            "collect: destroyed/killed the target (kind={}) -- note this fires the instant that happens, NOT once any drop is actually in inventory",
+            kind
+        );
+
+        // Look for a real dropped item before declaring this attempt
+        // done -- see ControlState.collectPickingUp's own docstring for
+        // why (the old behavior, reporting collect_result and clearing
+        // to IDLE right here, relied entirely on incidental proximity
+        // from mining to actually collect the drop, with zero explicit
+        // retrieval effort).
+        ItemEntity drop = findNearestMatchingDrop(level, destroyedAt, controlState.collectQuery);
+        if (drop == null) {
+            // No real drop entity anywhere nearby -- either it genuinely
+            // dropped nothing (real vanilla randomness) or it hasn't
+            // spawned this exact tick yet. Not worth a dedicated "wait a
+            // moment and check again" sub-phase here: Python's own
+            // drop-confirmation (MiningController.collect, watching real
+            // InventoryTracker counts with its own 5s window) already
+            // handles "destroyed/killed but produced nothing" correctly
+            // via its empty-drop retry counter -- this mod reporting
+            // success immediately when there's visibly nothing to walk
+            // to is consistent with that, not a regression from it.
+            finishCollectAttempt(true, null);
+            return;
+        }
+
+        LOGGER.info("collect: found dropped {} at ({}, {}, {}) -- walking to pick it up", drop.getItem(), drop.getX(), drop.getY(), drop.getZ());
+        controlState.collectPickingUp = true;
+        controlState.collectPickupStuckTicks = 0;
+        controlState.gotoX = drop.getX();
+        controlState.gotoY = drop.getY();
+        controlState.gotoZ = drop.getZ();
+        controlState.collectHasTarget = false;
+        controlState.stopDistance = 0.5; // real vanilla pickup radius is small -- walk genuinely close, not just "in melee range" the way mining/attacking needs
+        controlState.pathTracker.reset();
+    }
+
+    /**
+     * The brief "walk to the dropped item" phase after a target's been
+     * destroyed/killed -- see ControlState.collectPickingUp's own
+     * docstring for why this exists. Completes (reports collect_result)
+     * once the item's gone (picked up, by us or otherwise, or a natural
+     * despawn) or the pickup-timeout expires, whichever comes first --
+     * either way the block/entity was already genuinely
+     * destroyed/killed, so this always reports success regardless of
+     * whether the walk-over actually landed the item in inventory;
+     * Python's own drop-confirmation is still the real authority on
+     * whether to count this as a real gain (see MiningController.collect).
+     */
+    private void tickCollectPickup(final LocalPlayer player, final ClientLevel level) {
+        ItemEntity drop = findNearestMatchingDrop(level, new Vec3(controlState.gotoX, controlState.gotoY, controlState.gotoZ), controlState.collectQuery);
+        if (drop == null) {
+            LOGGER.info("collect: dropped item is gone (picked up or despawned) -- pickup phase done");
+            finishCollectAttempt(true, null);
+            return;
+        }
+
+        // Re-aim at the item's live position every tick -- it can still
+        // be settling (falling, sliding) for a moment after spawning.
+        controlState.gotoX = drop.getX();
+        controlState.gotoY = drop.getY();
+        controlState.gotoZ = drop.getZ();
+
+        if (++controlState.collectPickupStuckTicks > COLLECT_PICKUP_TIMEOUT_TICKS) {
+            LOGGER.warn("collect: gave up walking to the dropped item after {} ticks -- completing anyway", controlState.collectPickupStuckTicks);
+            finishCollectAttempt(true, null);
+        }
+    }
+
+    /**
+     * Finds the nearest real ItemEntity within COLLECT_PICKUP_SEARCH_RADIUS
+     * of `origin` whose item is one of DropTable.dropsFrom(query) -- null
+     * if none.
+     *
+     * DropTable's own maps are keyed/valued in bare ids ("cobblestone",
+     * not "minecraft:cobblestone" -- see its own class docstring), but
+     * BuiltInRegistries.ITEM.getKey(...) returns a full ResourceLocation
+     * whose toString() always includes the "minecraft:" namespace. Found
+     * live: the pickup-walk phase never once triggered across many real
+     * completions with a real matching drop sitting right next to the bot
+     * (confirmed via item_drop wire events landing right before "destroyed/
+     * killed the target") -- expectedDrops.contains(itemId) was
+     * structurally guaranteed to always be false, comparing "cobblestone"
+     * against "minecraft:cobblestone" every time, so every attempt fell
+     * straight through to finishCollectAttempt(true, null) instead of ever
+     * finding the drop it was looking for. The exact same namespace-
+     * mismatch bug class already found and fixed once on the Python side
+     * (see MiningController.collect's own expected_drops normalization),
+     * just never applied here.
+     */
+    private static ItemEntity findNearestMatchingDrop(final ClientLevel level, final Vec3 origin, final String query) {
+        List<String> expectedDrops = DropTable.dropsFrom(query);
+        ItemEntity nearest = null;
+        double nearestDistanceSq = COLLECT_PICKUP_SEARCH_RADIUS * COLLECT_PICKUP_SEARCH_RADIUS;
+        for (Entity entity : level.entitiesForRendering()) {
+            if (!(entity instanceof ItemEntity itemEntity)) {
+                continue;
+            }
+            String itemId = BuiltInRegistries.ITEM.getKey(itemEntity.getItem().getItem()).getPath();
+            if (!expectedDrops.contains(itemId)) {
+                continue;
+            }
+            double distanceSq = itemEntity.position().distanceToSqr(origin);
+            if (distanceSq <= nearestDistanceSq) {
+                nearest = itemEntity;
+                nearestDistanceSq = distanceSq;
+            }
+        }
+        return nearest;
+    }
+
+    /** Reports collect_result and clears back to IDLE -- the shared completion path for both a real pickup and a pickup-phase give-up. */
+    private void finishCollectAttempt(final boolean success, final String reason) {
+        String query = controlState.collectQuery;
+        controlState.clear();
+        broadcastCollectResultEvent(success, query, reason);
+    }
+
+    private boolean tickCollectBlock(final LocalPlayer player, final ClientLevel level) {
+        BlockPos pos = new BlockPos(
+            (int) Math.floor(controlState.gotoX), (int) Math.floor(controlState.gotoY), (int) Math.floor(controlState.gotoZ)
+        );
+        if (level.getBlockState(pos).isAir()) {
+            // Something else removed this block between the search that
+            // found it and now (another player mined it, gravity/a
+            // falling block cleared it, our own still-held attack key
+            // finally landing a break that started against a *previous*
+            // target at the same position, ...) -- BlockBreaker.tryBreak
+            // correctly reports false for an already-air target (see its
+            // own docstring on why "already gone" must never count as a
+            // fresh success), so without this the collect loop would sit
+            // here forever waiting for a break that already happened
+            // through means other than this run. Abandon this target and
+            // let the next tickCollect call search for a fresh one.
+            //
+            // Also exclude it (not just abandon it) -- reported live:
+            // without this, resolveNearest's very next search could (and
+            // did) immediately re-find this exact same now-air position
+            // again as "solid" (a genuine TOCTOU race between the search
+            // reading live block state and this check a tick or more
+            // later, once BlockBreaker's keyAttack-hold approach -- see
+            // its own docstring -- means a break can land slightly after
+            // the tick that found it), producing an infinite two-position
+            // oscillation that never actually made progress or hit the
+            // stuck-target timeout (each cycle "succeeded" in finding a
+            // fresh target in under a tick, so collectTargetStuckTicks
+            // never had a chance to accumulate). Same exclusion set the
+            // stuck-timeout path below already uses, for the same reason:
+            // findClosestMatch is fully deterministic for a fixed
+            // center/predicate, so re-searching without excluding a
+            // known-bad position just finds it again.
+            LOGGER.info("collect: target {} already air at start of tickCollectBlock -- abandoning and excluding, will re-search", pos);
+            controlState.collectExcludedPositions.add(pos);
+            controlState.collectHasTarget = false;
+            // This abandonment path never reaches BlockBreaker.tryBreak
+            // (short-circuited above), so none of *its* own key-release
+            // paths run either -- without this, a keyAttack hold left over
+            // from whatever this collectBreaker was actually mid-break on
+            // stays held indefinitely (Options.keyAttack.setDown(true) is
+            // sticky until explicitly released), silently continuing to
+            // mine whatever the crosshair happens to land on for however
+            // many ticks pass before the next real tryBreak call
+            // overwrites it. stopBreaking() is the same cleanup
+            // stopBreaking()'s own callers already rely on.
+            collectBreaker.stopBreaking();
+            return false;
+        }
+        return collectBreaker.tryBreak(player, level, pos);
+    }
+
+    private boolean tickCollectEntity(final LocalPlayer player, final ClientLevel level) {
+        Entity target = level.getEntity(controlState.followEntityId);
+        if (target == null || target.isRemoved()) {
+            return target == null; // gone without us landing the kill (disconnected/despawned) -- treat as done, move on
+        }
+        double dx = target.getX() - player.getX();
+        double dy = target.getY() - player.getY();
+        double dz = target.getZ() - player.getZ();
+        double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (distance > COLLECT_MELEE_RANGE) {
+            return false; // still walking there -- resolveMovementIntent's COLLECT case is driving that
+        }
+        Minecraft.getInstance().gameMode.attack(player, target);
+        player.swing(InteractionHand.MAIN_HAND);
+        return target.isRemoved();
+    }
+
+    /**
+     * Generic query/query_result mechanism -- currently only backs
+     * DropTable's drops_from/source_for lookups (see its own class
+     * docstring for the real-loot-table-access gap this is a stopgap
+     * for), but deliberately shaped as a general "ask the mod something,
+     * get a correlated answer back later" pattern rather than one-off
+     * wire messages per question, since more mod-side queries are likely
+     * to want the same shape later. Pure in-memory lookup (DropTable is
+     * a static map, no world-state access at all), so unlike handleFind
+     * this needs no thread-hop to the client tick thread -- answered
+     * synchronously, right here on the control channel's own thread.
+     */
+    private void handleQuery(final JsonObject json) {
+        String subType = json.get("sub_type").getAsString();
+        String key = json.get("key").getAsString();
+        JsonArray arguments = json.getAsJsonArray("arguments");
+        String argument = arguments.get(0).getAsString();
+
+        List<String> result = switch (subType) {
+            case "drops_from" -> DropTable.dropsFrom(argument);
+            case "source_for" -> List.of(DropTable.sourceFor(argument));
+            default -> {
+                LOGGER.warn("control channel: unknown query sub_type '{}'", subType);
+                yield List.of();
+            }
+        };
+        broadcastQueryResultEvent(key, result);
+    }
+
+    /**
      * !find resolves `query` as an entity type first, falling back to a
      * block type if no entity type by that name matched (e.g. "cow" is an
      * entity, not a block, so it resolves as one; "stone" has no entity
@@ -404,13 +810,21 @@ public final class MinebotMod implements ClientModInitializer {
     }
 
     /**
-     * Shared entity-then-block resolution behind !find -- tries `query` as
-     * an entity type first, falling back to a block type ("cow" has no
-     * block type, "stone" has no entity type, so trying entity first and
-     * falling back to block covers both without the caller needing to know
-     * which kind of thing it's asking for).
+     * Shared entity-then-block resolution behind both !find and !collect's
+     * per-item search step -- tries `query` as an entity type first,
+     * falling back to a block type (see class-level !find docs for why:
+     * "cow" has no block type, "stone" has no entity type, so trying
+     * entity first and falling back to block covers both without the
+     * caller needing to know which kind of thing it's asking for).
      */
     private static NearestMatch resolveNearest(final ClientLevel level, final LocalPlayer player, final String query, final int radius) {
+        return resolveNearest(level, player, query, radius, Collections.emptySet());
+    }
+
+    /** Same as the four-arg overload, but skips any block position in `excludedBlocks` -- see BlockFinder's own excluded-set overload for why (backs !collect's give-up-and-retry). */
+    private static NearestMatch resolveNearest(
+        final ClientLevel level, final LocalPlayer player, final String query, final int radius, final Set<BlockPos> excludedBlocks
+    ) {
         Identifier id = Identifier.parse(query.contains(":") ? query : "minecraft:" + query);
 
         Entity entity = EntityFinder.findNearestEntity(level, player.position(), id.toString(), radius);
@@ -419,7 +833,7 @@ public final class MinebotMod implements ClientModInitializer {
         }
 
         BlockPos center = player.blockPosition();
-        BlockPos block = BlockFinder.findNearestBlock(level, center, id.toString(), radius);
+        BlockPos block = BlockFinder.findNearestBlock(level, center, id.toString(), radius, excludedBlocks);
         if (block != null) {
             return new NearestMatch("block", block.getX() + 0.5, block.getY(), block.getZ() + 0.5, null, block);
         }
@@ -471,6 +885,26 @@ public final class MinebotMod implements ClientModInitializer {
                     ? new Double[]{followed.getX(), followed.getY(), followed.getZ()}
                     : null;
             }
+            case COLLECT -> {
+                if (controlState.collectPickingUp) {
+                    // Walking to the dropped item -- see tickCollect's own
+                    // pickup-phase docstring. Reuses gotoX/Y/Z the exact
+                    // same way the mining phase does, just re-pointed at
+                    // the item's position instead of the block/entity
+                    // that was just destroyed/killed.
+                    yield new Double[]{controlState.gotoX, controlState.gotoY, controlState.gotoZ};
+                }
+                if (!controlState.collectHasTarget) {
+                    yield null; // between items -- tickCollect (called below) is what searches for the next one
+                }
+                if (controlState.collectTargetIsEntity) {
+                    Entity target1 = level.getEntity(controlState.followEntityId);
+                    yield target1 != null
+                        ? new Double[]{target1.getX(), target1.getY(), target1.getZ()}
+                        : null;
+                }
+                yield new Double[]{controlState.gotoX, controlState.gotoY, controlState.gotoZ};
+            }
         };
 
         if (target == null) {
@@ -489,6 +923,30 @@ public final class MinebotMod implements ClientModInitializer {
         Move waypoint = controlState.pathTracker.nextWaypoint(selfX, selfY, selfZ, player.onGround());
         doorOpener.maybeOpenDoorNear(player, level, waypoint);
         boolean blockedByDig = maybeBreakBlocksNear(player, level, waypoint);
+
+        // COLLECT's own mining phase holds collectBreaker's keyAttack (see
+        // tickCollect, called later this same tick) completely independently
+        // of pathBlockBreaker/maybeBreakBlocksNear above -- which only ever
+        // reflects pathfinding's own dig-through-obstacles breaker. Without
+        // this, blockedByDig stayed false the entire time collectBreaker was
+        // actively mining a block reachable within BlockBreaker.INTERACT_RANGE
+        // (4.5) but outside stopDistance (2.5, see ControlState.setCollect),
+        // so `walking` below stayed true every tick: the bot kept walking
+        // forward (and jumping, once close enough to trip the step-height
+        // check) straight at the block it was simultaneously holding
+        // keyAttack against, constantly changing position/rotation out from
+        // under the in-progress break. Reported live: !collect held a real,
+        // steady non-zero getDestroyProgress against a target for the full
+        // 200-tick give-up window without ever completing, every single
+        // attempt, despite no tool switch and a clean line of sight -- the
+        // same "fighting aim/movement" class of bug already fixed once for
+        // pathfinding's own mid-dig walking (see the `walking` field's own
+        // comment below), just never wired up for collectBreaker.
+        boolean blockedByCollectMining = controlState.mode == ControlState.Mode.COLLECT
+            && !controlState.collectPickingUp
+            && !controlState.collectTargetIsEntity
+            && collectBreaker.hasActiveTarget();
+        blockedByDig = blockedByDig || blockedByCollectMining;
 
         // Aim at the next unreached waypoint's block center, or the raw
         // target if we have no plan (no path found / not yet computed).
@@ -749,6 +1207,7 @@ public final class MinebotMod implements ClientModInitializer {
                 // death fix addressed for a held key instead of a break).
                 pathBlockBreaker.stopBreaking();
                 digDownBreaker.stopBreaking();
+                collectBreaker.stopBreaking();
             }
             case "chat" -> {
                 Minecraft client = Minecraft.getInstance();
@@ -772,6 +1231,12 @@ public final class MinebotMod implements ClientModInitializer {
                 json.has("radius") ? json.get("radius").getAsInt() : DEFAULT_FIND_RADIUS
             );
             case "dig_down" -> controlState.setDigDown(json.get("count").getAsInt());
+            case "debug_swap_test" -> withPlayer(this::runDebugSwapTest);
+            case "collect" -> controlState.setCollect(
+                json.get("query").getAsString(),
+                json.has("radius") ? json.get("radius").getAsInt() : DEFAULT_FIND_RADIUS
+            );
+            case "query" -> handleQuery(json);
             default -> LOGGER.warn("control channel: unknown command type '{}'", type);
         }
     }
@@ -790,6 +1255,69 @@ public final class MinebotMod implements ClientModInitializer {
         if (player != null) {
             action.accept(player);
         }
+    }
+
+    /**
+     * Temporary !debug command handler -- tests whether InventoryActions.
+     * moveToHotbar's local-only swap (see its own docstring) is itself
+     * the cause of a live-reported client/server held-item desync (see
+     * FINDINGS.md's "InventoryActions.moveToHotbar's local-only swap
+     * genuinely desyncing the server's view of the held item" section),
+     * isolated from mining/BlockBreaker entirely.
+     *
+     * Sequence: find the diamond pickaxe wherever it currently is; if
+     * it's in the hotbar, shift-click it into main storage first (a real
+     * container click, so it starts from a known-clean, server-confirmed
+     * position -- see InventoryActions.moveToMainStorage); then call
+     * moveToHotbar to bring it into hotbar slot 0 and select it -- the
+     * exact mechanism under test. Logs every step's local state; the
+     * actual test is comparing what a human observer sees the bot
+     * holding afterward against these log lines, live, not something
+     * this method can verify on its own (there's no way for the mod to
+     * observe another client's rendered state of the bot).
+     */
+    private void runDebugSwapTest(final LocalPlayer player) {
+        Inventory inventory = player.getInventory();
+        int pickaxeSlot = -1;
+        for (int slot = 0; slot < Inventory.INVENTORY_SIZE; slot++) {
+            if (inventory.getItem(slot).is(Items.DIAMOND_PICKAXE)) {
+                pickaxeSlot = slot;
+                break;
+            }
+        }
+        if (pickaxeSlot < 0) {
+            LOGGER.info("debug_swap_test: no diamond pickaxe found anywhere in inventory -- aborting");
+            return;
+        }
+        LOGGER.info("debug_swap_test: found diamond pickaxe in slot {} (hotbar={})", pickaxeSlot, Inventory.isHotbarSlot(pickaxeSlot));
+
+        if (Inventory.isHotbarSlot(pickaxeSlot)) {
+            LOGGER.info("debug_swap_test: shift-clicking slot {} out of the hotbar into main storage first", pickaxeSlot);
+            InventoryActions.moveToMainStorage(player, pickaxeSlot);
+            // The shift-click is a real server round trip -- log where the
+            // client's own local prediction now thinks the pickaxe landed,
+            // for comparison against the next tick, but the actual
+            // moveToHotbar call below runs off this same local state
+            // regardless (same as every other caller of moveToHotbar
+            // today), which is exactly the scenario under test.
+            for (int slot = 0; slot < Inventory.INVENTORY_SIZE; slot++) {
+                if (inventory.getItem(slot).is(Items.DIAMOND_PICKAXE)) {
+                    LOGGER.info("debug_swap_test: after shift-click, local state shows pickaxe in slot {}", slot);
+                    pickaxeSlot = slot;
+                    break;
+                }
+            }
+        }
+
+        LOGGER.info(
+            "debug_swap_test: calling moveToHotbar({}, 0) -- was mainHand={}, selectedSlot={}",
+            pickaxeSlot, player.getMainHandItem(), inventory.getSelectedSlot()
+        );
+        InventoryActions.moveToHotbar(player, pickaxeSlot, 0);
+        LOGGER.info(
+            "debug_swap_test: done -- mainHand={}, selectedSlot={} (compare this against what other clients report seeing the bot hold)",
+            player.getMainHandItem(), inventory.getSelectedSlot()
+        );
     }
 
     private void broadcastChatEvent(final String sender, final String text) {
@@ -896,6 +1424,49 @@ public final class MinebotMod implements ClientModInitializer {
         if (reason != null) {
             event.addProperty("reason", reason);
         }
+        controlClient.sendEvent(event.toString());
+    }
+
+    /**
+     * Reports the outcome of a single !collect attempt -- `success` is
+     * true once the target was actually destroyed/killed (note: *not*
+     * once any drop is confirmed in inventory -- Python's own
+     * InventoryTracker is the source of truth for that, watching real
+     * inventory-gain events independently; this event only ever means
+     * "the block/entity is gone now"). `reason` is present on failure
+     * (e.g. "no more stone found nearby" when every candidate within
+     * radius was either not found at all or excluded as unreachable).
+     * No collected/requested counts anymore -- see tickCollect's own
+     * docstring for why counting moved to the Python side entirely.
+     */
+    private void broadcastCollectResultEvent(final boolean success, final String query, final String reason) {
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "collect_result");
+        event.addProperty("success", success);
+        event.addProperty("query", query);
+        if (reason != null) {
+            event.addProperty("reason", reason);
+        }
+        controlClient.sendEvent(event.toString());
+    }
+
+    /**
+     * Reply to a `query` command -- `key` is whatever correlation key
+     * the request carried (Python generates a fresh one per query, e.g.
+     * a uuid, since answers can arrive out of order relative to other
+     * traffic and there's no other way to match a reply back to its
+     * request the way find_result/collect_result can get away with
+     * "only one ever in flight" -- queries could plausibly overlap).
+     */
+    private void broadcastQueryResultEvent(final String key, final List<String> result) {
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "query_result");
+        event.addProperty("key", key);
+        JsonArray resultArray = new JsonArray();
+        for (String value : result) {
+            resultArray.add(value);
+        }
+        event.add("result", resultArray);
         controlClient.sendEvent(event.toString());
     }
 

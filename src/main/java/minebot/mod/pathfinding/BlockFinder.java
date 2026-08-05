@@ -4,6 +4,9 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 
+import java.util.Collections;
+import java.util.Set;
+
 /**
  * Finds the nearest block of a given registry type ("minecraft:oak_log",
  * "minecraft:stone", ...) within a search radius -- backs the !find/
@@ -34,9 +37,29 @@ public final class BlockFinder {
      * scan.
      */
     public static BlockPos findNearestBlock(final ClientLevel level, final BlockPos center, final String blockType, final int radius) {
+        return findNearestBlock(level, center, blockType, radius, Collections.emptySet());
+    }
+
+    /**
+     * Same as the three-arg overload, but skips any position in
+     * `excluded` -- backs !collect's give-up-and-retry logic
+     * (MinebotMod.tickCollect): a block found by pure distance can be
+     * genuinely unreachable (behind a wall from every angle the
+     * pathfinder considers within stopDistance, so BlockBreaker's
+     * line-of-sight check never passes), and without this, re-searching
+     * after giving up on it would just find the exact same block again
+     * every time (findClosestMatch is fully deterministic for a fixed
+     * center/predicate) -- an infinite abandon loop instead of trying a
+     * different one.
+     */
+    public static BlockPos findNearestBlock(
+        final ClientLevel level, final BlockPos center, final String blockType, final int radius, final Set<BlockPos> excluded
+    ) {
         return BlockPos.findClosestMatch(
             center, radius, radius,
-            pos -> level.isLoaded(pos) && BuiltInRegistries.BLOCK.getKey(level.getBlockState(pos).getBlock()).toString().equals(blockType)
+            pos -> !excluded.contains(pos)
+                && level.isLoaded(pos)
+                && BuiltInRegistries.BLOCK.getKey(level.getBlockState(pos).getBlock()).toString().equals(blockType)
         ).orElse(null);
     }
 }

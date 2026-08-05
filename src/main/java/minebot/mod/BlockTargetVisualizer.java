@@ -21,21 +21,32 @@ import net.minecraft.gizmos.Gizmos;
  * built-in debug-draw API.
  *
  * Color-coded per BlockBreaker purpose (matching the "pathfinding"/
- * "digDown" labels each instance already carries for log attribution) so
- * overlapping/adjacent targets from different goals are still
- * distinguishable at a glance.
+ * "digDown"/"collect" labels each instance already carries for log
+ * attribution) so overlapping/adjacent targets from different goals are
+ * still distinguishable at a glance.
  */
 public final class BlockTargetVisualizer {
+    // Deliberately NOT the same cyan PathVisualizer's own planned-path
+    // line uses -- reported live: with both using 0xFF00FFFF, a "cyan
+    // target" report was ambiguous between this class's own cube outline
+    // and PathVisualizer's line/waypoint-marker overlay potentially
+    // passing right by/through the same block, and the two are genuinely
+    // impossible to tell apart at a glance when they overlap. Distinct
+    // hues per visualizer now, not just per BlockBreaker instance within
+    // this one.
     private static final int PATHFINDING_COLOR = 0xFF00FF00; // green
     private static final int DIG_DOWN_COLOR = 0xFFFF8800; // orange
+    private static final int COLLECT_COLOR = 0xFFFF00FF; // magenta
     private static final float STROKE_WIDTH = 4.0f;
 
     private final BlockBreaker pathBlockBreaker;
     private final BlockBreaker digDownBreaker;
+    private final BlockBreaker collectBreaker;
 
-    public BlockTargetVisualizer(final BlockBreaker pathBlockBreaker, final BlockBreaker digDownBreaker) {
+    public BlockTargetVisualizer(final BlockBreaker pathBlockBreaker, final BlockBreaker digDownBreaker, final BlockBreaker collectBreaker) {
         this.pathBlockBreaker = pathBlockBreaker;
         this.digDownBreaker = digDownBreaker;
+        this.collectBreaker = collectBreaker;
     }
 
     public void register() {
@@ -45,7 +56,8 @@ public final class BlockTargetVisualizer {
     private void drawTargets(final LevelRenderContext context) {
         BlockPos pathTarget = pathBlockBreaker.currentTarget();
         BlockPos digDownTarget = digDownBreaker.currentTarget();
-        if (pathTarget == null && digDownTarget == null) {
+        BlockPos collectTarget = collectBreaker.currentTarget();
+        if (pathTarget == null && digDownTarget == null && collectTarget == null) {
             return;
         }
 
@@ -55,6 +67,9 @@ public final class BlockTargetVisualizer {
             }
             if (digDownTarget != null) {
                 Gizmos.cuboid(digDownTarget, GizmoStyle.stroke(DIG_DOWN_COLOR, STROKE_WIDTH)).setAlwaysOnTop();
+            }
+            if (collectTarget != null) {
+                Gizmos.cuboid(collectTarget, GizmoStyle.stroke(COLLECT_COLOR, STROKE_WIDTH)).setAlwaysOnTop();
             }
         }
     }
