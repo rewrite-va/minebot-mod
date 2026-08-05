@@ -1,5 +1,7 @@
 package minebot.mod.statemachine;
 
+import minebot.mod.MinebotMod;
+
 import java.util.List;
 import java.util.Map;
 
@@ -11,11 +13,19 @@ import java.util.Map;
  * (calling onExit/onEnter as the transition happens), then publishes its
  * (possibly just-changed) current state to the shared Blackboard.
  *
+ * Every real transition is logged here, once, at the transition site --
+ * not left for individual nodes' onEnter to each remember to log
+ * themselves (same reasoning as the SharedResourceArbiter's
+ * reapAbandonedOwnership() safety net in STATE_MACHINE.md: a
+ * per-node-remembers-to-do-it convention is exactly the kind of thing
+ * that silently doesn't happen somewhere and is hard to notice).
+ *
  * Not thread-safe -- only ever touched from the client tick thread, same
  * as every other piece of per-tick mod state (ControlState, EdgeTrigger,
  * ...).
  */
 public final class StateMachine<S extends Enum<S>> {
+    private final String name;
     private final S initialState;
     private final Map<S, StateNode> nodes;
     private final Map<S, List<Edge<S>>> edgesByFromState;
@@ -23,12 +33,18 @@ public final class StateMachine<S extends Enum<S>> {
     private S currentState;
     private boolean started;
 
-    public StateMachine(final S initialState, final Map<S, StateNode> nodes, final List<Edge<S>> edges) {
+    /** `name` identifies this SM in log lines (e.g. "general", "legs") -- purely cosmetic, doesn't affect behavior. */
+    public StateMachine(final String name, final S initialState, final Map<S, StateNode> nodes, final List<Edge<S>> edges) {
+        this.name = name;
         this.initialState = initialState;
         this.nodes = nodes;
         this.edgesByFromState = edges.stream()
             .collect(java.util.stream.Collectors.groupingBy(Edge::from, java.util.LinkedHashMap::new, java.util.stream.Collectors.toList()));
         this.currentState = initialState;
+    }
+
+    public String name() {
+        return name;
     }
 
     public S initialState() {
@@ -51,7 +67,9 @@ public final class StateMachine<S extends Enum<S>> {
         for (Edge<S> edge : edgesByFromState.getOrDefault(currentState, List.of())) {
             if (edge.condition().test(ctx)) {
                 nodeFor(currentState).onExit(ctx);
+                S previousState = currentState;
                 currentState = edge.to();
+                MinebotMod.LOGGER.info("{}: {} -> {}", name, previousState, currentState);
                 nodeFor(currentState).onEnter(ctx);
                 break; // first matching edge wins, per STATE_MACHINE.md -- not evaluating the rest against the new state until next tick
             }

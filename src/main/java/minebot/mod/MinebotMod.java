@@ -15,6 +15,8 @@ import minebot.mod.pathfinding.BlockFinder;
 import minebot.mod.pathfinding.DoorOpener;
 import minebot.mod.pathfinding.Move;
 import minebot.mod.statemachine.Blackboard;
+import minebot.mod.statemachine.Command;
+import minebot.mod.statemachine.CommandBus;
 import minebot.mod.statemachine.StateMachine;
 import minebot.mod.statemachine.TickContext;
 import minebot.mod.statemachine.general.GeneralState;
@@ -127,15 +129,16 @@ public final class MinebotMod implements ClientModInitializer {
     private final ItemDropTracker itemDropTracker = new ItemDropTracker();
     private final RespawnHandler respawnHandler = new RespawnHandler(this::broadcastDeathEvent, this::broadcastRespawnEvent);
     private final NearbyPlayerLookAt nearbyPlayerLookAt = new NearbyPlayerLookAt();
-    // First real piece of the peer-state-machine architecture described
-    // in STATE_MACHINE.md -- General SM currently has only an IDLE node
-    // (see GeneralStateMachine's own docstring for why), ticked every
-    // client tick alongside everything else below but not yet read or
-    // acted on by anything, purely to have a real, live, working
-    // StateMachine+Blackboard running before building the next axis on
-    // top of it. Legs/Hands/Head follow later, per STATE_MACHINE.md's
-    // "Implementation order".
+    // The peer-state-machine architecture described in STATE_MACHINE.md.
+    // CommandBus is how a typed Command (see its own docstring) crosses
+    // from dispatchMessage (WebSocket thread) to state machine edge
+    // conditions (tick thread only) -- General SM is the first thing
+    // built against it, deliberately independent of ControlState's own
+    // (working, untouched) volatile-fields cross-thread pattern. Legs/
+    // Hands/Head follow later, per STATE_MACHINE.md's "Implementation
+    // order".
     private final Blackboard blackboard = new Blackboard();
+    private final CommandBus commandBus = new CommandBus();
     private final StateMachine<GeneralState> generalStateMachine = GeneralStateMachine.create();
     private ControlClient controlClient;
     private float lastReportedHealth = -1;
@@ -144,7 +147,7 @@ public final class MinebotMod implements ClientModInitializer {
     public void onInitializeClient() {
         controlClient = new ControlClient("localhost", ControlClient.DEFAULT_PORT, this::handleMessage, this::onControlChannelConnected);
         controlClient.start();
-        new StatusHud(controlClient).register();
+        new StatusHud(controlClient, List.of(generalStateMachine)).register();
         new PathVisualizer(controlState.pathTracker).register();
         new BlockTargetVisualizer(pathBlockBreaker, digDownBreaker, collectBreaker).register();
 
@@ -217,9 +220,13 @@ public final class MinebotMod implements ClientModInitializer {
         // See STATE_MACHINE.md's "Tick order" -- SMs tick before
         // everything else touches player/level state this tick, and
         // publish to the shared Blackboard for the next tick's
-        // conditions to read. Only General exists so far (IDLE-only,
-        // nothing reads it yet) -- Legs/Hands/Head follow later.
-        generalStateMachine.tick(new TickContext(player, level, blackboard));
+        // conditions to read. Only General exists so far -- Legs/Hands/
+        // Head follow later. commandBus.drain() must happen exactly once
+        // per tick, here, so every Command published since the last tick
+        // (from dispatchMessage, a different thread -- see CommandBus's
+        // own docstring) is visible to exactly one tick's worth of edge
+        // conditions, never dropped and never double-counted.
+        generalStateMachine.tick(new TickContext(player, level, blackboard, commandBus.drain()));
 
         MovementIntent intent = resolveMovementIntent(player, level);
         if (!(player.input instanceof MinebotInput)) {
@@ -1549,12 +1556,25 @@ public final class MinebotMod implements ClientModInitializer {
                 json.get("x").getAsDouble(), json.get("y").getAsDouble(), json.get("z").getAsDouble(),
                 json.has("stop_distance") ? json.get("stop_distance").getAsDouble() : 2.0
             );
-            case "follow" -> controlState.setFollow(
-                json.get("entity_id").getAsInt(),
-                json.has("stop_distance") ? json.get("stop_distance").getAsDouble() : 2.0
-            );
+            case "follow" -> {
+                controlState.setFollow(
+                    json.get("entity_id").getAsInt(),
+                    json.has("stop_distance") ? json.get("stop_distance").getAsDouble() : 2.0
+                );
+                // Also published as a typed Command -- see Command/
+                // CommandBus's own docstrings. ControlState.setFollow
+                // above is untouched/still the real thing driving actual
+                // FOLLOW movement (resolveMovementIntent) -- this is a
+                // parallel signal General SM reacts to, currently a
+                // label-only transition (see GeneralState.FOLLOW).
+                commandBus.publish(new Command.Follow(
+                    json.get("entity_id").getAsInt(),
+                    json.has("stop_distance") ? json.get("stop_distance").getAsDouble() : 2.0
+                ));
+            }
             case "stop" -> {
                 controlState.clear();
+                commandBus.publish(new Command.Stop());
                 // Also aborts any in-progress block break -- without this,
                 // !stop mid-dig left the mining animation/progress stuck
                 // active even though the goal that started it was cleared
