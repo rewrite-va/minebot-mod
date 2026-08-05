@@ -199,28 +199,17 @@ public final class MinebotMod implements ClientModInitializer {
             return;
         }
 
+        // TEMPORARY -- re-isolating one piece at a time, per explicit
+        // direction, after confirming the bow broke again once
+        // everything was restored (d982d25). Piece under test right
+        // now: MinebotInput/resolveMovementIntent/auto-look RESTORED,
+        // foodEater.maybeEat/respawnHandler/broadcast* still OUT.
         MovementIntent intent = resolveMovementIntent(player, level);
         if (!(player.input instanceof MinebotInput)) {
             player.input = new MinebotInput(new KeyboardInput(client.options));
         }
         ((MinebotInput) player.input).setIntent(intent);
 
-        // Only look at a nearby player while genuinely idle (no goal at
-        // all) -- checking intent.yaw == null alone isn't enough:
-        // BlockBreaker.aimAt sets yaw/pitch *directly* on the player
-        // (not through MovementIntent) while mining, so resolveMovementIntent
-        // still reports yaw == null on every tick spent breaking a block,
-        // and this override was undoing aimAt's work the instant a
-        // player got close enough to trigger it -- reported live: mining
-        // visibly slowed down/stopped progressing whenever a nearby
-        // player approached, since the bot kept glancing at them instead
-        // of the block, and BlockState.getDestroyProgress only counts
-        // ticks actually spent looking at (and swinging at) the target.
-        // ControlState.mode is the actual "is there a current goal"
-        // signal -- IDLE is the only mode with nothing at all in
-        // progress (GOTO/FOLLOW/GIVE/DIG_DOWN/COLLECT/ATTACK all have a
-        // real goal, whether or not it happens to be setting yaw via
-        // MovementIntent this specific tick).
         if (intent.yaw == null && controlState.mode == ControlState.Mode.IDLE) {
             MovementIntent lookIntent = nearbyPlayerLookAt.resolve(player, level);
             if (lookIntent != null) {
@@ -235,32 +224,17 @@ public final class MinebotMod implements ClientModInitializer {
             player.setXRot(intent.pitch);
         }
 
+        tickAttack(player, level);
+
+        /*
         maybeCompleteGive(player, level);
         tickDigDown(player, level);
         tickCollect(player, level);
-        tickAttack(player, level);
 
         respawnHandler.tick(player);
         if (player.isDeadOrDying()) {
-            // FoodEater isn't ticked while dead (no point trying to eat at
-            // 0 health), but it may have left the real `keyUse` keybind
-            // held down from the moment before death -- release it here
-            // so it doesn't stay stuck through death/respawn (which would
-            // either resume eating immediately regardless of the fresh
-            // post-respawn state, or leave a human retaking manual
-            // control later finding right-click stuck held).
             foodEater.releaseUseKeyIfHeld();
-            // Same reasoning, for BlockBreaker's keyAttack hold (see its
-            // own docstring for why it holds the real keybind now instead
-            // of calling continueDestroyBlock directly) -- a break in
-            // progress at the moment of death would otherwise leave attack
-            // stuck held through death/respawn.
             BlockBreaker.releaseAttackKeyIfHeld();
-            // BowShooter calls MultiPlayerGameMode.releaseUsingItem
-            // directly (no keybind involved, see its own docstring for
-            // why), but a draw left in progress at the moment of death
-            // should still be cleanly released rather than left as
-            // stale local state through respawn.
             bowShooter.stop(player);
         } else {
             foodEater.maybeEat(player);
@@ -276,6 +250,7 @@ public final class MinebotMod implements ClientModInitializer {
             lastReportedHealth = health;
             broadcastHealthEvent(health);
         }
+        */
     }
 
     /**
