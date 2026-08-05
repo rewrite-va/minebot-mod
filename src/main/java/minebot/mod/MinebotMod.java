@@ -70,38 +70,22 @@ public final class MinebotMod implements ClientModInitializer {
     private static final int DEFAULT_FIND_RADIUS = 64;
 
     /**
-     * A player's position/orientation, rounded to a comparison precision
-     * -- used to decide whether `position` (self) and `entity` "move"
-     * (other players) events are actually worth broadcasting, the same
-     * change-only-broadcast shape InventoryReporter already established
-     * for inventory (see its own docstring for why: a JSON-string
-     * comparison was real, unnecessary overhead once already tried
-     * elsewhere -- this is a plain value comparison from the start).
-     * Rounding (not exact equality) matters here specifically because
-     * raw floats jitter by tiny fractions every tick from real physics
-     * even while genuinely standing still (confirmed live: this is
-     * exactly why `position`/`entity` "move" were firing every single
-     * tick regardless of any real movement, flooding minebot-frontend's
-     * live wire viewer with hundreds of near-identical messages a
-     * second) -- two ticks a real player would call "the same spot,
-     * same way of looking" should compare equal, not just bit-identical
-     * ticks.
+     * A player's exact position/orientation -- used to decide whether
+     * `position` (self) and `entity` "move" (other players) events are
+     * actually worth broadcasting, the same change-only-broadcast shape
+     * InventoryReporter already established for inventory (see its own
+     * docstring for why: a JSON-string comparison was real, unnecessary
+     * overhead once already tried elsewhere -- this is a plain value
+     * comparison from the start). A buffer of exactly 1 (compared only
+     * against the immediately-previous broadcast, not any tolerance
+     * band) -- normal physics jitter is real movement and should still
+     * get its own event; this only suppresses sending the literal same
+     * values again in a row (confirmed live: many consecutive ticks were
+     * broadcasting bit-identical position/move data, e.g. while another
+     * player stood still, flooding minebot-frontend's live wire viewer
+     * with genuinely redundant messages -- not jitter, exact repeats).
      */
-    private record PositionSnapshot(long x, long y, long z, long yaw, long pitch) {
-        // Two decimal places for position (0.01 block -- far tighter
-        // than anything gameplay-relevant here cares about, e.g.
-        // GOTO_STOP_DISTANCE is 0.2), one decimal place for yaw/pitch
-        // (0.1 degree) -- both comfortably below real physics jitter's
-        // typical magnitude but well above it being mistaken for a
-        // deliberate move. Longs (not a record of doubles) so the
-        // record's free equals/hashCode is exact integer comparison,
-        // not float comparison with its own subtler equality pitfalls.
-        static PositionSnapshot of(final double x, final double y, final double z, final double yaw, final double pitch) {
-            return new PositionSnapshot(
-                Math.round(x * 100), Math.round(y * 100), Math.round(z * 100),
-                Math.round(yaw * 10), Math.round(pitch * 10)
-            );
-        }
+    private record PositionSnapshot(double x, double y, double z, float yaw, float pitch) {
     }
 
     private PositionSnapshot lastBroadcastSelfPosition;
@@ -1552,22 +1536,21 @@ public final class MinebotMod implements ClientModInitializer {
     }
 
     /**
-     * Broadcasts `position` only when it's actually meaningfully
-     * different from the last one sent -- see PositionSnapshot's own
-     * docstring for why (real physics jitter means raw floats almost
-     * never compare bit-identical tick to tick, even standing still, so
-     * this was previously firing unconditionally on every single tick
-     * regardless of any real movement). `on_ground` is deliberately not
-     * part of the comparison snapshot -- it's a boolean already, so it
-     * can't jitter the way floats do, but including it here would
-     * reintroduce spurious broadcasts every time it flips fully
+     * Broadcasts `position` only when it actually differs from the last
+     * one sent -- see PositionSnapshot's own docstring: this is a plain
+     * exact-duplicate dedup (buffer of 1), not a jitter tolerance, so
+     * real movement (however small) always still gets its own event.
+     * `on_ground` is deliberately not part of the comparison snapshot --
+     * it's a boolean already, so it can't produce duplicate-value spam
+     * the way repeated identical position readings can, but including it
+     * here would trigger its own broadcast every time it flips fully
      * independent of any position/orientation change (e.g. brief
      * ground-contact flicker while standing still on stairs/slabs);
      * Python has no code path today that reads `on_ground` at all, so
      * there's no consumer this would risk staling.
      */
     private void maybeBroadcastPositionEvent(final LocalPlayer player) {
-        PositionSnapshot snapshot = PositionSnapshot.of(
+        PositionSnapshot snapshot = new PositionSnapshot(
             player.getX(), player.getY(), player.getZ(), player.getYRot(), player.getXRot()
         );
         if (snapshot.equals(lastBroadcastSelfPosition)) {
@@ -1793,16 +1776,16 @@ public final class MinebotMod implements ClientModInitializer {
         knownPlayerIds.addAll(currentIds);
     }
 
-    /** Position-only comparison (no yaw/pitch -- the entity event's own wire shape never carries orientation, only x/y/z) -- see PositionSnapshot's own docstring for why rounding, not exact equality. */
+    /** Position-only comparison (no yaw/pitch -- the entity event's own wire shape never carries orientation, only x/y/z) -- see PositionSnapshot's own docstring for why this is an exact-duplicate dedup, not a jitter tolerance. */
     private static PositionSnapshot entityPositionSnapshot(final Entity entity) {
-        return PositionSnapshot.of(entity.getX(), entity.getY(), entity.getZ(), 0, 0);
+        return new PositionSnapshot(entity.getX(), entity.getY(), entity.getZ(), 0, 0);
     }
 
     /**
      * Broadcasts an entity "move" only when that specific player's
-     * position actually changed meaningfully since the last one sent for
-     * them -- same reasoning/shape as maybeBroadcastPositionEvent, just
-     * per-tracked-entity instead of a single self snapshot (see
+     * position actually differs from the last one sent for them -- same
+     * reasoning/shape as maybeBroadcastPositionEvent, just per-tracked-
+     * entity instead of a single self snapshot (see
      * lastBroadcastEntityPosition's own field comment for why a map, not
      * one shared snapshot: each tracked player's movement is
      * independent).
