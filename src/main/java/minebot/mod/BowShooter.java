@@ -5,6 +5,7 @@ import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.BowItem;
+import net.minecraft.world.item.ItemStack;
 
 /**
  * Draws and fires a real bow at a target via a direct call to
@@ -56,6 +57,42 @@ import net.minecraft.world.item.BowItem;
  * FULL_DRAW_TICKS locally, then call releaseUsingItem() -- the real
  * client/server exchange those two calls trigger is what fires the
  * shot, regardless of what isUsingItem() ever reports back to us.
+ *
+ * Firing itself calls BowItem.releaseUsing(stack, level, player,
+ * timeLeft) directly rather than MultiPlayerGameMode.releaseUsingItem(),
+ * for the same class of reason: LivingEntity.releaseUsingItem() (which
+ * MultiPlayerGameMode.releaseUsingItem() calls locally after sending the
+ * network release packet) computes its own timeLeft from
+ * getUseItemRemainingTicks() -- a field only ever decremented inside
+ * LivingEntity.updateUsingItem(), which is only called from
+ * LivingEntity.tick()'s own "am I using an item" branch when
+ * isUsingItem() is true. Since isUsingItem() is essentially never true
+ * on this client (see above), that decrement never ran locally, so
+ * useItemRemaining sat at its untouched initial value (BowItem.
+ * getUseDuration() = 72000) the whole draw -- making the computed
+ * ticksUsed (getUseDuration - timeLeft) come out near zero and
+ * BowItem.releaseUsing's own power = getPowerForTime(ticksUsed) fall
+ * under its 0.1 minimum, so it silently returned false and fired
+ * nothing every time (confirmed live: the draw/release cycle completed
+ * cleanly on a steady ~1s timer with zero stalling after the isUsingItem
+ * -polling fix above, but target health and carried-arrow count never
+ * moved even once across 15+ consecutive "full draw reached, releasing"
+ * cycles). Passing BowItem.getUseDuration() - ticksSinceDrawStarted
+ * directly as timeLeft (the same trick MC_Instant-Shoot_Mod's mixin
+ * uses with a hardcoded 72000 - 20 for its instant full-power shot)
+ * sidesteps this local-decrement dependency entirely -- BowItem.
+ * releaseUsing still needs the player.getProjectile(stack) check to
+ * pass (real ammo) and still only actually spawns the arrow when
+ * `level` is a ServerLevel, but the *client* call here isn't what
+ * spawns the arrow anyway -- MultiPlayerGameMode.releaseUsingItem()'s
+ * own ServerboundPlayerActionPacket(RELEASE_USE_ITEM) send (kept
+ * below) is what tells the real server to run its own independent
+ * releaseUsing with its own correctly-ticked-down remaining-use time,
+ * which is what actually fires the arrow. This client-side call exists
+ * only to mirror vanilla's local player.releaseUsingItem() clearing
+ * useItem/useItemRemaining/stopUsingItem's local echo, using a power
+ * value that won't fall under the 0.1 floor and silently no-op the
+ * local half of it.
  *
  * Aim direction is ported directly from AbstractSkeleton.performRangedAttack
  * (confirmed via decompiled 26.1.2 source) rather than solving real
@@ -124,7 +161,7 @@ public final class BowShooter {
         }
 
         MinebotMod.LOGGER.info("bow: full draw reached, releasing");
-        Minecraft.getInstance().gameMode.releaseUsingItem(player);
+        release(player, ticksSinceDrawStarted);
         drawing = false;
         return true;
     }
@@ -132,8 +169,25 @@ public final class BowShooter {
     /** Releases a shot left mid-draw -- e.g. the target died, was abandoned, or !stop/a new command superseded this attack. */
     public void stop(final LocalPlayer player) {
         if (drawing) {
-            Minecraft.getInstance().gameMode.releaseUsingItem(player);
+            release(player, ticksSinceDrawStarted);
             drawing = false;
+        }
+    }
+
+    /**
+     * Sends the real network release (telling the server, which has its
+     * own correctly-ticked-down draw state, to fire) and separately
+     * drives BowItem.releaseUsing directly with a locally-computed
+     * timeLeft so this client's own local echo doesn't silently no-op --
+     * see the class docstring for why MultiPlayerGameMode.
+     * releaseUsingItem()'s own local half can't be relied on here.
+     */
+    private static void release(final LocalPlayer player, final int ticksHeld) {
+        Minecraft.getInstance().gameMode.releaseUsingItem(player);
+        ItemStack bow = player.getMainHandItem();
+        if (bow.getItem() instanceof BowItem bowItem) {
+            int timeLeft = bowItem.getUseDuration(bow, player) - ticksHeld;
+            bowItem.releaseUsing(bow, player.level(), player, timeLeft);
         }
     }
 
