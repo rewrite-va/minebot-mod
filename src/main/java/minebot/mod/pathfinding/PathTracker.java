@@ -38,6 +38,21 @@ public final class PathTracker {
 
     private final Deque<Move> currentPath = new ArrayDeque<>();
     private double[] pathComputedFor; // {x, y, z}, or null if no path has been computed yet
+    // The stopDistance the current path was actually planned for --
+    // GoalNear bakes stopDistance into the plan itself (see setAttack's
+    // own call site), so a path computed for one stopDistance can walk
+    // straight past a *different*, later one with nothing here ever
+    // noticing, since target-moved/self-drift alone say nothing about
+    // this. Reported live: !attack initially plans with ControlState.
+    // setAttack's fixed 2.5 default (melee range) before tickAttack's own
+    // per-tick weapon check has a chance to raise it to bow range -- a
+    // stationary target (targetMoved always ~0) and the bot staying on
+    // its own path (selfDrift always low) meant the stale melee-range
+    // path was never replanned even after stopDistance changed to bow
+    // range moments later, so the bot walked all the way into melee
+    // range with a bow equipped and never actually backed off to shoot
+    // from range.
+    private double stopDistanceComputedFor = Double.NaN;
 
     /**
      * (Re)computes a path toward (targetX, targetY, targetZ) if we don't
@@ -53,7 +68,7 @@ public final class PathTracker {
         final double selfX, final double selfY, final double selfZ,
         final double targetX, final double targetY, final double targetZ, final double stopDistance
     ) {
-        if (pathComputedFor != null && !currentPath.isEmpty()) {
+        if (pathComputedFor != null && !currentPath.isEmpty() && stopDistance == stopDistanceComputedFor) {
             double dx = pathComputedFor[0] - targetX;
             double dy = pathComputedFor[1] - targetY;
             double dz = pathComputedFor[2] - targetZ;
@@ -71,6 +86,7 @@ public final class PathTracker {
         }
 
         pathComputedFor = new double[]{targetX, targetY, targetZ};
+        stopDistanceComputedFor = stopDistance;
         currentPath.clear();
 
         int startX = (int) Math.floor(selfX);
@@ -174,6 +190,7 @@ public final class PathTracker {
     public void reset() {
         currentPath.clear();
         pathComputedFor = null;
+        stopDistanceComputedFor = Double.NaN;
     }
 
     /** Read-only view of the currently planned path, in walk order -- for debug visualization (PathVisualizer). */
