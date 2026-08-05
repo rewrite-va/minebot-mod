@@ -201,9 +201,11 @@ public final class MinebotMod implements ClientModInitializer {
 
         // TEMPORARY -- re-isolating one piece at a time, per explicit
         // direction, after confirming the bow broke again once
-        // everything was restored (d982d25). Piece under test right
-        // now: MinebotInput/resolveMovementIntent/auto-look RESTORED,
-        // foodEater.maybeEat/respawnHandler/broadcast* still OUT.
+        // everything was restored (d982d25). Confirmed working with
+        // MinebotInput/resolveMovementIntent/auto-look restored (this
+        // wasn't the cause). Piece under test right now:
+        // respawnHandler/death-cleanup RESTORED; foodEater.maybeEat and
+        // all broadcast* calls still OUT.
         MovementIntent intent = resolveMovementIntent(player, level);
         if (!(player.input instanceof MinebotInput)) {
             player.input = new MinebotInput(new KeyboardInput(client.options));
@@ -226,19 +228,18 @@ public final class MinebotMod implements ClientModInitializer {
 
         tickAttack(player, level);
 
-        /*
-        maybeCompleteGive(player, level);
-        tickDigDown(player, level);
-        tickCollect(player, level);
-
         respawnHandler.tick(player);
         if (player.isDeadOrDying()) {
             foodEater.releaseUseKeyIfHeld();
             BlockBreaker.releaseAttackKeyIfHeld();
             bowShooter.stop(player);
-        } else {
-            foodEater.maybeEat(player);
         }
+        // foodEater.maybeEat(player); -- still OUT, testing separately
+
+        /*
+        maybeCompleteGive(player, level);
+        tickDigDown(player, level);
+        tickCollect(player, level);
 
         maybeBroadcastPositionEvent(player);
         broadcastEntityEvents(player, level);
