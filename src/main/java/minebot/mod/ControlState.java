@@ -20,7 +20,7 @@ import minebot.mod.util.EdgeTrigger;
  * race risk is.
  */
 public final class ControlState {
-    public enum Mode { IDLE, GOTO, FOLLOW, GIVE }
+    public enum Mode { IDLE, GOTO, FOLLOW, GIVE, DIG_DOWN }
 
     public volatile Mode mode = Mode.IDLE;
 
@@ -39,6 +39,18 @@ public final class ControlState {
     public volatile int giveCount;
 
     public volatile double stopDistance = 2.0;
+
+    // DIG_DOWN: the original request and how many are still left to break
+    // straight down -- digDownTotal is kept alongside digDownRemaining so
+    // the tick loop can report "how many did we actually break" in the
+    // result event without needing to reconstruct it after
+    // digDownRemaining's already been mutated. No target position/
+    // pathTracker involvement at all -- this is a stationary "break the
+    // block below me, repeat" loop, ticked directly from
+    // MinebotMod.onClientTick rather than through resolveMovementIntent's
+    // GOTO-style target resolution.
+    public volatile int digDownTotal;
+    public volatile int digDownRemaining;
 
     // Owns the currently-planned A* route toward whatever target the mode
     // above resolves to -- lives here (rather than as a MinebotMod field)
@@ -91,6 +103,15 @@ public final class ControlState {
         this.giveSlot = slot;
         this.giveCount = count;
         this.stopDistance = stopDistance;
+        this.pathTracker.reset();
+        this.gotoArrived.reset();
+    }
+
+    /** Starts a straight-down dig loop -- see MinebotMod.tickDigDown for the actual per-tick break/abort logic. */
+    public void setDigDown(final int count) {
+        this.mode = Mode.DIG_DOWN;
+        this.digDownTotal = count;
+        this.digDownRemaining = count;
         this.pathTracker.reset();
         this.gotoArrived.reset();
     }

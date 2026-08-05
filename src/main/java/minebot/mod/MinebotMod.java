@@ -9,6 +9,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.KeyboardInput;
 import net.minecraft.client.player.LocalPlayer;
+import minebot.mod.pathfinding.BlockBreaker;
 import minebot.mod.pathfinding.BlockFinder;
 import minebot.mod.pathfinding.DoorOpener;
 import minebot.mod.pathfinding.Move;
@@ -17,6 +18,8 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -63,6 +66,16 @@ public final class MinebotMod implements ClientModInitializer {
     // player's name (see onControlChannelConnected's docstring).
     private final Set<Integer> knownPlayerIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final DoorOpener doorOpener = new DoorOpener();
+    private final BlockBreaker pathBlockBreaker = new BlockBreaker("pathfinding");
+    // Separate BlockBreaker instances per mode -- each tracks its own
+    // single in-progress break (see BlockBreaker's own docstring), and
+    // DIG_DOWN/pathfinding-through-a-wall can each have a different
+    // target block in play, so sharing one instance across modes would
+    // make one mode's break silently reset another's in-progress
+    // progress the moment they targeted different blocks. Each is
+    // labeled (see BlockBreaker's own constructor) so its debug logging
+    // identifies which one produced a given line.
+    private final BlockBreaker digDownBreaker = new BlockBreaker("digDown");
     private final FoodEater foodEater = new FoodEater();
     private final InventoryReporter inventoryReporter = new InventoryReporter();
     private final RespawnHandler respawnHandler = new RespawnHandler(this::broadcastDeathEvent, this::broadcastRespawnEvent);
@@ -76,6 +89,7 @@ public final class MinebotMod implements ClientModInitializer {
         controlClient.start();
         new StatusHud(controlClient).register();
         new PathVisualizer(controlState.pathTracker).register();
+        new BlockTargetVisualizer(pathBlockBreaker, digDownBreaker).register();
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onClientTick);
 
@@ -139,15 +153,23 @@ public final class MinebotMod implements ClientModInitializer {
         }
         ((MinebotInput) player.input).setIntent(intent);
 
-        // Only look at a nearby player when resolveMovementIntent didn't
-        // already set a look direction for this tick -- it only sets yaw
-        // while actively walking toward a pathfinding waypoint (yaw
-        // doubles as "which way to walk forward" then), so overriding it
-        // here would fight the pathfinding. Whenever there's no active
-        // walking yaw (idle, arrived, or a !goto/!follow target that
-        // isn't currently resolvable), glance at whoever's closest
-        // instead, independent of any goal.
-        if (intent.yaw == null) {
+        // Only look at a nearby player while genuinely idle (no goal at
+        // all) -- checking intent.yaw == null alone isn't enough:
+        // BlockBreaker.aimAt sets yaw/pitch *directly* on the player
+        // (not through MovementIntent) while mining, so resolveMovementIntent
+        // still reports yaw == null on every tick spent breaking a block,
+        // and this override was undoing aimAt's work the instant a
+        // player got close enough to trigger it -- reported live: mining
+        // visibly slowed down/stopped progressing whenever a nearby
+        // player approached, since the bot kept glancing at them instead
+        // of the block, and BlockState.getDestroyProgress only counts
+        // ticks actually spent looking at (and swinging at) the target.
+        // ControlState.mode is the actual "is there a current goal"
+        // signal -- IDLE is the only mode with nothing at all in
+        // progress (GOTO/FOLLOW/GIVE/DIG_DOWN all have a real goal,
+        // whether or not it happens to be setting yaw via MovementIntent
+        // this specific tick).
+        if (intent.yaw == null && controlState.mode == ControlState.Mode.IDLE) {
             MovementIntent lookIntent = nearbyPlayerLookAt.resolve(player, level);
             if (lookIntent != null) {
                 intent = lookIntent;
@@ -162,6 +184,7 @@ public final class MinebotMod implements ClientModInitializer {
         }
 
         maybeCompleteGive(player, level);
+        tickDigDown(player, level);
 
         respawnHandler.tick(player);
         if (player.isDeadOrDying()) {
@@ -173,6 +196,12 @@ public final class MinebotMod implements ClientModInitializer {
             // post-respawn state, or leave a human retaking manual
             // control later finding right-click stuck held).
             foodEater.releaseUseKeyIfHeld();
+            // Same reasoning, for BlockBreaker's keyAttack hold (see its
+            // own docstring for why it holds the real keybind now instead
+            // of calling continueDestroyBlock directly) -- a break in
+            // progress at the moment of death would otherwise leave attack
+            // stuck held through death/respawn.
+            BlockBreaker.releaseAttackKeyIfHeld();
         } else {
             foodEater.maybeEat(player);
         }
@@ -218,6 +247,100 @@ public final class MinebotMod implements ClientModInitializer {
         }
         InventoryActions.drop(player, controlState.giveSlot, controlState.giveCount);
         controlState.clear();
+    }
+
+    /**
+     * !digDown: breaks the block directly below the player, repeatedly,
+     * `digDownRemaining` times -- stops early (and reports why via
+     * dig_down_result) if the next block down is lava/water, or if
+     * there's no solid floor within a safety margin below the block just
+     * broken (a "big drop", per PENDING.md's explicit ask mirroring
+     * mindcraft's skills.digDown). No pathfinding/A* involved at all --
+     * this is a stationary loop, not a movement goal (see
+     * resolveMovementIntent's DIG_DOWN case, which handles the one real
+     * movement need -- centering over the current column, see
+     * centerDigDownIntent -- separately from this method's own breaking
+     * logic).
+     */
+    private static final int DIG_DOWN_DROP_SAFETY_MARGIN = 3;
+
+    private void tickDigDown(final LocalPlayer player, final ClientLevel level) {
+        if (controlState.mode != ControlState.Mode.DIG_DOWN) {
+            return;
+        }
+
+        if (!isCenteredForDig(player)) {
+            // resolveMovementIntent's DIG_DOWN case is walking the bot to
+            // center this same tick -- don't start (or continue aiming/
+            // swinging at) a break until it gets there, or the target
+            // column computed here could point at the wrong block
+            // relative to where the bot ends up standing.
+            return;
+        }
+
+        // tickSettle every tick regardless of what runs below, so a settle
+        // window started by the previous block's break actually counts
+        // down -- see BlockBreaker.isBusy's own docstring for why the next
+        // block shouldn't start until the last one has actually had time
+        // to settle, not just appear locally gone.
+        digDownBreaker.tickSettle(level);
+        // Only skip calling tryBreak while purely settling (no active
+        // target) -- gating this on isBusy() alone (the old check here)
+        // deadlocked forever the moment a tool switch made tryBreak
+        // return false without completing anything (see BlockBreaker.
+        // hasActiveTarget's own docstring for the live repro that found
+        // this): isBusy() was already true from that point on, so this
+        // would never call tryBreak again and the dig could never
+        // progress past the very first block that needed a tool switch.
+        if (!digDownBreaker.hasActiveTarget() && digDownBreaker.isBusy()) {
+            return;
+        }
+
+        BlockPos below = player.blockPosition().below();
+        BlockState belowState = level.getBlockState(below);
+        if (!belowState.getFluidState().isEmpty()) {
+            int broken = controlState.digDownTotal - controlState.digDownRemaining;
+            digDownBreaker.stopBreaking();
+            controlState.clear();
+            broadcastDigDownResultEvent(broken, "hit lava/water");
+            return;
+        }
+
+        boolean brokeThisTick = digDownBreaker.tryBreak(player, level, below);
+        if (!brokeThisTick) {
+            return; // still breaking, out of reach, or (see BlockBreaker.tryBreak) below was already air with nothing this call actually broke
+        }
+
+        controlState.digDownRemaining--;
+
+        // Check what's below what we just broke -- a genuine "big drop"
+        // (open air all the way down past the safety margin, no floor to
+        // catch the fall) should stop here rather than keep digging into
+        // a fall the bot has no way to recover from mid-loop.
+        BlockPos scan = below.below();
+        boolean foundFloorOrLiquid = false;
+        for (int i = 0; i < DIG_DOWN_DROP_SAFETY_MARGIN; i++) {
+            BlockState scanState = level.getBlockState(scan);
+            if (!scanState.getFluidState().isEmpty() || !scanState.isAir()) {
+                foundFloorOrLiquid = true;
+                break;
+            }
+            scan = scan.below();
+        }
+        if (!foundFloorOrLiquid) {
+            int broken = controlState.digDownTotal - controlState.digDownRemaining;
+            digDownBreaker.stopBreaking();
+            controlState.clear();
+            broadcastDigDownResultEvent(broken, "big drop ahead");
+            return;
+        }
+
+        if (controlState.digDownRemaining <= 0) {
+            int broken = controlState.digDownTotal;
+            digDownBreaker.stopBreaking();
+            controlState.clear();
+            broadcastDigDownResultEvent(broken, null);
+        }
     }
 
     /**
@@ -319,8 +442,28 @@ public final class MinebotMod implements ClientModInitializer {
     private MovementIntent resolveMovementIntent(final LocalPlayer player, final ClientLevel level) {
         MovementIntent intent = new MovementIntent();
 
+        if (controlState.mode == ControlState.Mode.DIG_DOWN) {
+            // DIG_DOWN needs no A*/waypoints (it's a straight-down loop,
+            // not real navigation) but it does need the bot standing
+            // reasonably centered over its own column before digging --
+            // reported live: without this, digging while straddling two
+            // columns (feet partially over the target block, partially
+            // over its still-solid neighbor) let the bot avoid ever
+            // actually falling into the hole it just dug, so the *next*
+            // tick's "block below me" was still the same already-broken
+            // (now air) block -- BlockBreaker correctly reports that as
+            // "nothing to break" now (see its docstring), but before that
+            // fix the loop just kept reporting fresh "successes" for a
+            // single real break, undercounting real progress while
+            // overcounting reported progress (5 requested, only 1 block
+            // actually gone). centerDigDownIntent (below) walks the bot
+            // to its own column's center first; tickDigDown only starts
+            // breaking once close enough.
+            return centerDigDownIntent(player);
+        }
+
         Double[] target = switch (controlState.mode) {
-            case IDLE -> null;
+            case IDLE, DIG_DOWN -> null; // DIG_DOWN already returned above -- unreachable here, kept only for switch exhaustiveness
             case GOTO -> new Double[]{controlState.gotoX, controlState.gotoY, controlState.gotoZ};
             case FOLLOW, GIVE -> {
                 Entity followed = level.getEntity(controlState.followEntityId);
@@ -341,10 +484,11 @@ public final class MinebotMod implements ClientModInitializer {
         double selfZ = player.getZ();
 
         controlState.pathTracker.maybeReplan(
-            level, selfX, selfY, selfZ, target[0], target[1], target[2], controlState.stopDistance
+            level, player, selfX, selfY, selfZ, target[0], target[1], target[2], controlState.stopDistance
         );
-        Move waypoint = controlState.pathTracker.nextWaypoint(selfX, selfY, selfZ);
+        Move waypoint = controlState.pathTracker.nextWaypoint(selfX, selfY, selfZ, player.onGround());
         doorOpener.maybeOpenDoorNear(player, level, waypoint);
+        boolean blockedByDig = maybeBreakBlocksNear(player, level, waypoint);
 
         // Aim at the next unreached waypoint's block center, or the raw
         // target if we have no plan (no path found / not yet computed).
@@ -366,26 +510,196 @@ public final class MinebotMod implements ClientModInitializer {
             broadcastArrivedEvent();
         }
 
-        if (horizontalDistance > distanceToStopAt) {
+        // While a waypoint still has blocks left to dig through, hold off
+        // walking forward into it -- BlockBreaker is already aiming/
+        // swinging at the target this same tick (see
+        // maybeBreakBlocksNear), and walking into a still-solid block
+        // achieves nothing but bumping into a wall. Collision would mostly
+        // prevent this anyway, but an explicit hold keeps yaw/forward
+        // intent from fighting the aim BlockBreaker just set. Reported
+        // live: this hold used to only cover forward/yaw/pitch, not jump
+        // (see below) -- the bot kept spamming jump in place while stuck
+        // mid-dig on a waypoint that happened to require a step up,
+        // pointlessly hopping instead of just standing still and finishing
+        // the break.
+        boolean walking = horizontalDistance > distanceToStopAt && !blockedByDig;
+        if (walking) {
             intent.forward = true;
             // Vanilla yaw convention: 0 = south/+z, matching Entity.getYRot()
             // and the atan2(-dx, dz) form used throughout the decompiled
             // source's own movement code.
             intent.yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
-            // Level horizon while actively walking a waypoint -- without
-            // this, pitch was simply never touched here (only intent.yaw
-            // was), so it stayed at whatever NearbyPlayerLookAt's last
-            // glance left it at, tilted up/down at a nearby player instead
-            // of looking straight ahead while moving.
-            intent.pitch = 0f;
+            // pitch is set below (looking at the waypoint), not here --
+            // see that block's own comment for why a blanket level-horizon
+            // pitch used to fight BlockBreaker.aimAt.
         }
 
+        // Only jump while actually walking toward the waypoint -- gated on
+        // the same `walking` condition as forward/yaw above, not just
+        // `dy > MAX_STEP_HEIGHT_TRIGGER` alone (see this method's own
+        // docstring update above for the live bug this fixes: jumping in
+        // place, pointlessly, while stuck mid-dig on a step-up waypoint).
+        //
+        // Also gated on not currently standing over farmland -- real
+        // vanilla (FarmBlock.fallOn) rolls a chance to trample farmland
+        // back to plain dirt on landing, scaling with fall distance;
+        // repeated real jumps each roll that chance independently, so
+        // even a low per-jump probability becomes near-certain over many
+        // landings. Reported live: pathfinding to a crop (!collect
+        // carrot) walks straight across the farm plot to reach it, and
+        // any step-up jump taken while still over farmland risked
+        // trampling the very crop being walked toward, or its neighbors.
+        // A plain walk across farmland doesn't trigger this at all (the
+        // chance is fall-distance-gated) -- only suppressing the jump
+        // itself, not all movement, actually needed.
+        boolean standingOnFarmland = level.getBlockState(player.blockPosition().below()).is(Blocks.FARMLAND);
         double dy = aimY - selfY;
-        if (dy > MAX_STEP_HEIGHT_TRIGGER) {
+        if (walking && dy > MAX_STEP_HEIGHT_TRIGGER && !standingOnFarmland) {
             intent.jump = true;
+            // Sprint into any jump, not just a plain walking hop --
+            // MovementIntent.sprint existed but nothing ever set it, so
+            // every jump this whole mod has ever executed used vanilla's
+            // plain walking-jump distance (~0.6 blocks with no forward
+            // speed built up), never the meaningfully longer real
+            // distance a sprint-jump covers. Reported live: a jump across
+            // a real gap (a raised platform reachable only via a running
+            // leap, not a plain step-up) consistently came up short and
+            // fell -- every single waypoint in this A* graph is a single
+            // adjacent-cell step (see Movements.getMoveJumpUp/
+            // getMoveDiagonal, both dx/dz in {-1,0,1} only), planned
+            // assuming a real player's jump reach, not the shorter
+            // walking-jump reach this mod was actually executing.
+            // Sprinting into every jump waypoint (not just ones the
+            // planner flags as tight, since there's no such flag and a
+            // sprint-jump is never actually harmful for a jump that would
+            // have succeeded anyway) closes that gap.
+            intent.sprint = true;
+        }
+
+        // Look at the next waypoint while genuinely walking toward it.
+        // Reported live: a blanket "level the pitch while moving" (this
+        // used to unconditionally set intent.pitch = 0f here) fought
+        // BlockBreaker.aimAt's own direct player.setXRot call the moment
+        // mining resumed after a waypoint's dig finished -- aimAt runs
+        // earlier this same tick (inside maybeBreakBlocksNear, above) and
+        // sets pitch straight at the block being mined, but the very next
+        // tick this code unconditionally reset it back to level before the
+        // bot had actually finished looking at (and making progress on)
+        // the target, undoing aimAt's work every other tick. Gated on
+        // `walking` (mutually exclusive with blockedByDig, see above) so
+        // this never runs on a tick BlockBreaker already owns pitch for --
+        // mining always looks at the target block (aimAt), walking always
+        // looks at the next waypoint (this), and neither overwrites the
+        // other's work as a side effect.
+        if (walking) {
+            double eyeDy = aimY - player.getEyeY();
+            intent.pitch = (float) -Math.toDegrees(Math.atan2(eyeDy, horizontalDistance));
         }
 
         return intent;
+    }
+
+    // How close (horizontally, blocks) the bot's feet must be to its own
+    // column's center before tickDigDown will start breaking -- tight
+    // enough that gravity reliably drops the bot straight into the hole
+    // once the block below is gone (the actual bug this exists to fix:
+    // digging while straddling two columns left the bot balanced on the
+    // still-solid neighbor instead of falling), loose enough that real
+    // physics jitter (the bot is never perfectly motionless) doesn't
+    // thrash between "centered" and "not centered" every tick.
+    private static final double DIG_DOWN_CENTER_TOLERANCE = 0.15;
+
+    /**
+     * Walks the bot to the horizontal center of its own current block --
+     * DIG_DOWN's only movement need, no A-star or waypoints involved (see
+     * resolveMovementIntent's DIG_DOWN case for why). Returns an empty
+     * intent once already centered within DIG_DOWN_CENTER_TOLERANCE, at
+     * which point tickDigDown (ticked separately, see onClientTick) takes
+     * over and starts breaking.
+     */
+    private MovementIntent centerDigDownIntent(final LocalPlayer player) {
+        MovementIntent intent = new MovementIntent();
+
+        double centerX = Math.floor(player.getX()) + 0.5;
+        double centerZ = Math.floor(player.getZ()) + 0.5;
+        double dx = centerX - player.getX();
+        double dz = centerZ - player.getZ();
+        double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
+
+        if (horizontalDistance > DIG_DOWN_CENTER_TOLERANCE) {
+            intent.forward = true;
+            intent.yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+            intent.pitch = 90f; // look straight down -- centering is purely horizontal, and this doubles as visual feedback that a dig is in progress
+        }
+
+        return intent;
+    }
+
+    /** True once the bot's feet are close enough to its own column's center for tickDigDown to safely start breaking (see DIG_DOWN_CENTER_TOLERANCE). */
+    private static boolean isCenteredForDig(final LocalPlayer player) {
+        double dx = (Math.floor(player.getX()) + 0.5) - player.getX();
+        double dz = (Math.floor(player.getZ()) + 0.5) - player.getZ();
+        return Math.sqrt(dx * dx + dz * dz) <= DIG_DOWN_CENTER_TOLERANCE;
+    }
+
+    /**
+     * Breaks through a waypoint's toBreak list (see Movements.java's
+     * dig-cost port) as the bot approaches it -- called every tick from
+     * resolveMovementIntent, same "does nothing most ticks" shape as
+     * doorOpener.maybeOpenDoorNear. Returns true while a required block is
+     * still standing OR pathBlockBreaker is still settling after a
+     * just-completed break (caller should hold off walking/jumping either
+     * way -- see BlockBreaker.isBusy's own docstring for why resuming
+     * movement the instant a break's client-predicted completion is seen
+     * is unsafe), false once every block in the list is gone and any
+     * settle window has elapsed.
+     *
+     * Only ever targets the *first* still-solid block in the list at a
+     * time -- BlockBreaker itself only tracks one in-progress break, and
+     * toBreak's own order (movements.js's own toBreak.push order,
+     * preserved through the port) is already the order a move's blocks
+     * need clearing in for that move to actually be walkable.
+     */
+    private boolean maybeBreakBlocksNear(final LocalPlayer player, final ClientLevel level, final Move waypoint) {
+        pathBlockBreaker.tickSettle(level);
+
+        // If pathBlockBreaker still has an active target, but that exact
+        // position is no longer anywhere in the *current* waypoint's
+        // toBreak list, abandon it explicitly instead of just falling
+        // through to isBusy() below. Reported live: a replanned path (or
+        // simply reaching a new waypoint) can leave the current
+        // waypoint/toBreak completely different from what
+        // pathBlockBreaker was last actually digging -- nothing in this
+        // method ever called tryBreak or stopBreaking() again for the
+        // stale target once that happened, so currentTarget stayed frozen
+        // forever, isBusy() stayed true forever (blocking all movement,
+        // see resolveMovementIntent's own blockedByDig gating), and the
+        // bot just stood there -- visibly "targeting" a block it had
+        // already stopped actually trying to mine, with zero further log
+        // output to explain why. This is the pathfinding-specific version
+        // of the same "isBusy() can only ever be cleared by tryBreak, but
+        // nothing keeps calling tryBreak" deadlock class already found
+        // and fixed for !dig/!debug -- see BlockBreaker.hasActiveTarget's
+        // own docstring.
+        BlockPos activeTarget = pathBlockBreaker.currentTarget();
+        if (activeTarget != null && (waypoint == null || !waypoint.toBreak.contains(activeTarget))) {
+            LOGGER.info(
+                "mining[pathfinding]: abandoning stale target {} -- no longer in the current waypoint's toBreak list (waypoint={})",
+                activeTarget, waypoint
+            );
+            pathBlockBreaker.stopBreaking();
+        }
+
+        if (waypoint == null || waypoint.toBreak.isEmpty()) {
+            return pathBlockBreaker.isBusy();
+        }
+        for (BlockPos pos : waypoint.toBreak) {
+            if (!level.getBlockState(pos).isAir()) {
+                pathBlockBreaker.tryBreak(player, level, pos);
+                return true;
+            }
+        }
+        return pathBlockBreaker.isBusy();
     }
 
     private void handleMessage(final String rawJson) {
@@ -426,7 +740,16 @@ public final class MinebotMod implements ClientModInitializer {
                 json.get("entity_id").getAsInt(),
                 json.has("stop_distance") ? json.get("stop_distance").getAsDouble() : 2.0
             );
-            case "stop" -> controlState.clear();
+            case "stop" -> {
+                controlState.clear();
+                // Also aborts any in-progress block break -- without this,
+                // !stop mid-dig left the mining animation/progress stuck
+                // active even though the goal that started it was cleared
+                // (same class of bug FoodEater's stuck-keyUse-through-
+                // death fix addressed for a held key instead of a break).
+                pathBlockBreaker.stopBreaking();
+                digDownBreaker.stopBreaking();
+            }
             case "chat" -> {
                 Minecraft client = Minecraft.getInstance();
                 if (client.player != null && json.has("text")) {
@@ -448,6 +771,7 @@ public final class MinebotMod implements ClientModInitializer {
                 json.get("query").getAsString(),
                 json.has("radius") ? json.get("radius").getAsInt() : DEFAULT_FIND_RADIUS
             );
+            case "dig_down" -> controlState.setDigDown(json.get("count").getAsInt());
             default -> LOGGER.warn("control channel: unknown command type '{}'", type);
         }
     }
@@ -555,6 +879,22 @@ public final class MinebotMod implements ClientModInitializer {
             event.addProperty("x", x);
             event.addProperty("y", y);
             event.addProperty("z", z);
+        }
+        controlClient.sendEvent(event.toString());
+    }
+
+    /**
+     * Reports how a !digDown run ended -- `broken` is how many blocks were
+     * actually dug (may be less than requested on an early stop). `reason`
+     * is omitted on full completion (broken == the original request),
+     * present ("hit lava/water" / "big drop ahead") on an early abort.
+     */
+    private void broadcastDigDownResultEvent(final int broken, final String reason) {
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "dig_down_result");
+        event.addProperty("broken", broken);
+        if (reason != null) {
+            event.addProperty("reason", reason);
         }
         controlClient.sendEvent(event.toString());
     }

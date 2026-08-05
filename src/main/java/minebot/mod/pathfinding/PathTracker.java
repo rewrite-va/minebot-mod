@@ -2,6 +2,7 @@ package minebot.mod.pathfinding;
 
 import minebot.mod.MinebotMod;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.player.LocalPlayer;
 
 import java.util.ArrayDeque;
 import java.util.Collection;
@@ -48,7 +49,8 @@ public final class PathTracker {
      * in that case, same as the Python port, rather than freezing.
      */
     public void maybeReplan(
-        final ClientLevel level, final double selfX, final double selfY, final double selfZ,
+        final ClientLevel level, final LocalPlayer player,
+        final double selfX, final double selfY, final double selfZ,
         final double targetX, final double targetY, final double targetZ, final double stopDistance
     ) {
         if (pathComputedFor != null && !currentPath.isEmpty()) {
@@ -82,7 +84,7 @@ public final class PathTracker {
             return;
         }
 
-        Movements movements = new Movements(level);
+        Movements movements = new Movements(level, player);
         Move start = new Move(startX, startY, startZ, 0.0);
         GoalNear goal = new GoalNear(targetX, targetY, targetZ, stopDistance);
         AStar astar = new AStar(start, movements::getNeighbors, goal::heuristic, goal::isEnd, PATHFINDING_TIMEOUT_MILLIS);
@@ -106,12 +108,20 @@ public final class PathTracker {
 
         if ((result.status() == AStar.Status.SUCCESS || result.status() == AStar.Status.PARTIAL) && !result.path().isEmpty()) {
             currentPath.addAll(result.path());
-            MinebotMod.LOGGER.debug(
+            // Temporarily promoted from debug to info -- this client's
+            // default log4j config filters debug output entirely (see
+            // BlockBreaker's own per-tick diagnostic for the same
+            // reasoning), and a live report of a bot repeatedly jumping
+            // at an unreachable gap instead of using a real, longer
+            // walkable detour needs direct visibility into what path (if
+            // any) A* actually chose, not just inference from position
+            // traces.
+            MinebotMod.LOGGER.info(
                 "pathfinding: planned path of {} waypoints (status={}, cost={}): {}",
                 result.path().size(), result.status(), result.cost(), result.path()
             );
         } else {
-            MinebotMod.LOGGER.debug("pathfinding: no path found (status={}), falling back to raw target-following", result.status());
+            MinebotMod.LOGGER.info("pathfinding: no path found (status={}), falling back to raw target-following", result.status());
         }
     }
 
@@ -121,13 +131,38 @@ public final class PathTracker {
      * (the caller falls back to the target's raw position, which by then
      * should be within stopDistance anyway since the path was planned
      * toward a GoalNear around it).
+     *
+     * `onGround` gates how strict the Y-reached check is. Reported live:
+     * a straight-up staircase climb has several consecutive waypoints
+     * sharing the exact same (x, z) column, differing only by y (one
+     * step higher each time) -- so the old check's only real
+     * discriminator between "reached step 3" and "reached step 5" was
+     * `Math.abs(selfY - waypoint.y) < 1.0`. Mid-air during a jump's
+     * vertical arc, selfY swings by more than a full block within a
+     * handful of ticks (real gravity, not error) -- easily satisfying
+     * that loose tolerance against several different waypoints in quick
+     * succession while genuinely still airborne, well before actually
+     * landing on any of them. Each spurious match popped a waypoint the
+     * bot hadn't really reached, racing the plan far ahead of the bot's
+     * real position -- observed live as the bot climbing correctly up to
+     * jump height, the aim then reversing 180 degrees mid-air (chasing
+     * whatever waypoint got spuriously reached next), and falling all
+     * the way back down to retry the same climb, repeatedly, instead of
+     * ever completing the final jump onto the target platform. While
+     * airborne (`!onGround`), require selfY to be within 0.1 of the
+     * waypoint's own y (a real landed foothold, not "somewhere in the
+     * arc that happens to be within a block") before counting it
+     * reached; once back on solid ground, the original 1.0 tolerance is
+     * fine (real per-tick Y jitter while walking is tiny, nothing like a
+     * jump arc's swing).
      */
-    public Move nextWaypoint(final double selfX, final double selfY, final double selfZ) {
+    public Move nextWaypoint(final double selfX, final double selfY, final double selfZ, final boolean onGround) {
+        double yTolerance = onGround ? 1.0 : 0.1;
         while (!currentPath.isEmpty()) {
             Move waypoint = currentPath.peekFirst();
             boolean reached = Math.floor(selfX) == waypoint.x
                 && Math.floor(selfZ) == waypoint.z
-                && Math.abs(selfY - waypoint.y) < 1.0;
+                && Math.abs(selfY - waypoint.y) < yTolerance;
             if (!reached) {
                 return waypoint;
             }
