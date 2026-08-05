@@ -292,8 +292,25 @@ roughly:
 Per explicit decision: **write this whole document first (done, this
 file), then implement incrementally, one SM at a time, against a
 codebase that keeps working throughout** -- never a big-bang rewrite.
-Suggested order, each step independently shippable/revertable/testable
-live before starting the next:
+Suggested order below, each step independently shippable/revertable/
+testable live before starting the next.
+
+**Actual sequencing so far diverges from this suggested order, on
+explicit direction**: the reusable engine (`StateMachine`/`Blackboard`/
+`Edge`/`StateNode`/`TickContext`, all in `minebot.mod.statemachine`) plus
+General SM's very first node (`GeneralIdleNode`, `minebot.mod.
+statemachine.general`) were built and wired into `MinebotMod.
+onClientTick` first, specifically to get one real axis running
+end-to-end (ticking every frame, publishing to the Blackboard) before
+deciding how existing classes like `BowShooter`/`FoodEater`/
+`BlockBreaker` become nodes -- that question was explicitly deferred,
+not answered by this first step. This first step is a true no-op in
+practice (`GeneralState` has only `IDLE`, nothing reads General's
+published state yet) and was deliberately NOT deployed live for that
+reason (nothing to observe) -- see this file's own git history for when
+each piece landed if the exact order matters later.
+
+Suggested order for what comes next, unchanged from the original plan:
 
 1. **`SharedResourceArbiter` + the Hands SM first.** This is the one
    with the actual, real, already-twice-diagnosed bug history
@@ -304,18 +321,25 @@ live before starting the next:
    `FINDINGS.md`) with the real mechanism this document describes, and
    is the axis most likely to have a similar bug again if left
    uncoordinated (e.g. once shields/blocking or eating-while-mining ever
-   need to coexist).
+   need to coexist). **Whether `BowShooter`/`FoodEater`/`BlockBreaker`
+   actually get rewritten AS nodes, vs. nodes that simply call into
+   them, is still an open, explicitly deferred decision -- revisit this
+   per class, don't assume a full port.**
 2. **Legs SM**, folding in today's `ControlState.Mode` plus the
    kiting/retreat logic currently embedded in `MinebotMod.tickAttack`.
 3. **Head SM**, folding in the yaw/pitch-precedence logic currently
    spread across `resolveMovementIntent`/`BlockBreaker.aimAt`/
    `BowShooter.aimAt`/`NearbyPlayerLookAt`.
-4. **General SM** last, once there's more than one real "overall
-   behavior" concept worth distinguishing beyond what Legs already
-   captures (today's `ControlState.Mode` largely already plays General's
-   role for lack of a better place to put it -- pulling it out into its
-   own true peer SM is more valuable once FARMING/BUILDING/DEFENDING
-   etc. are real, not just IDLE/COMBAT wrapping what Legs already knows).
+4. **General SM's remaining states** (COMBAT/FLEEING/FARMING/BUILDING/
+   DEAD/...), once there's more than one real "overall behavior" concept
+   worth distinguishing beyond what Legs already captures (today's
+   `ControlState.Mode` largely already plays General's role for lack of
+   a better place to put it -- pulling more out of it is more valuable
+   once FARMING/BUILDING/DEFENDING etc. are real, not just an IDLE/
+   COMBAT wrapper around what Legs already knows). General's *engine
+   skeleton* already exists (step 0 above) -- this step is about adding
+   real second/third states and the edges into them, not building the
+   axis from scratch.
 
 Each step should leave `!attack`/`!goto`/`!collect`/etc. working
 end-to-end via live testing (see `AGENTS.md`'s build/deploy/verify
