@@ -75,9 +75,7 @@ public final class BowShooter {
 
         if (!drawing) {
             drawing = true;
-            MinebotMod.LOGGER.info(
-                "bow: starting draw (isUsingItem={}, usedItemHand={})", player.isUsingItem(), player.getUsedItemHand()
-            );
+            logDiagnostics(player, "starting draw");
             return false;
         }
 
@@ -91,9 +89,7 @@ public final class BowShooter {
             // shot silently never completed, with nothing at all in the
             // log to explain why), not to spam a line 20 times per shot.
             if (ticksUsing % 5 == 0) {
-                MinebotMod.LOGGER.info(
-                    "bow: drawing, {} / {} ticks (isUsingItem={})", ticksUsing, FULL_DRAW_TICKS, player.isUsingItem()
-                );
+                logDiagnostics(player, "drawing, " + ticksUsing + " / " + FULL_DRAW_TICKS + " ticks");
             }
             return false;
         }
@@ -136,6 +132,37 @@ public final class BowShooter {
         float pitch = (float) -Math.toDegrees(Math.atan2(dy, horizontalDistance));
         player.setYRot(yaw);
         player.setXRot(pitch);
+    }
+
+    /**
+     * Dumps every real precondition Minecraft.startUseItem checks before
+     * it actually sets the LivingEntity "using item" flag that isUsingItem()/
+     * getTicksUsingItem() read (confirmed via decompiled source: that flag
+     * is only ever set server-side, in response to a real client->server
+     * interaction packet -- so a draw that never progresses could be
+     * blocked at any of several distinct real gates: MultiPlayerGameMode.
+     * isDestroying(), LocalPlayer.isHandsBusy(), whether the real
+     * Minecraft.hitResult happens to be aimed at the target entity itself
+     * (which would route the interaction to MultiPlayerGameMode.interact
+     * instead of useItem -- a materially different code path than eating/
+     * mining ever exercised, since neither is ever aimed at a hostile
+     * entity), or simply the keyUse keybind's own isDown() not reading
+     * back as expected). Added specifically because a real stuck draw
+     * produced no other diagnostic signal anywhere in this class.
+     */
+    private static void logDiagnostics(final LocalPlayer player, final String phase) {
+        Minecraft client = Minecraft.getInstance();
+        var hitResult = client.hitResult;
+        String hitDescription = hitResult == null ? "null" : hitResult.getType() + (
+            hitResult instanceof net.minecraft.world.phys.EntityHitResult entityHit
+                ? " entity=" + entityHit.getEntity()
+                : ""
+        );
+        MinebotMod.LOGGER.info(
+            "bow: {} -- isUsingItem={} usedItemHand={} keyUseDown={} isDestroying={} isHandsBusy={} hitResult={}",
+            phase, player.isUsingItem(), player.getUsedItemHand(), client.options.keyUse.isDown(),
+            client.gameMode.isDestroying(), player.isHandsBusy(), hitDescription
+        );
     }
 
     private static void holdUseKey() {
