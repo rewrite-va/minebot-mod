@@ -24,7 +24,7 @@ import java.util.Set;
  * race risk is.
  */
 public final class ControlState {
-    public enum Mode { IDLE, GOTO, FOLLOW, GIVE, DIG_DOWN, COLLECT }
+    public enum Mode { IDLE, GOTO, FOLLOW, GIVE, DIG_DOWN, COLLECT, ATTACK }
 
     public volatile Mode mode = Mode.IDLE;
 
@@ -127,6 +127,22 @@ public final class ControlState {
     // existed, just after a real attempt to close the distance first.
     public volatile int collectPickupStuckTicks;
 
+    // ATTACK: query is null for "nearest hostile" (any entity that is a
+    // real Enemy, per Monster/Enemy's own marker interface -- see
+    // MinebotMod.isHostile), or a specific entity type name ("!attack
+    // cow") to fight regardless of hostility. Target itself, once found,
+    // is tracked the same way COLLECT's entity case is: followEntityId
+    // reused as the live target id, re-resolved to its current position
+    // every tick via the normal FOLLOW-style movement resolution.
+    public volatile String attackQuery;
+    public volatile int attackRadius;
+    public volatile boolean attackHasTarget;
+    // How many ticks the current target has gone without being reachable
+    // (out of melee range and pathfinding isn't closing the distance,
+    // or the target fled out of render distance) -- same give-up-and-
+    // report-failure shape as collectTargetStuckTicks.
+    public volatile int attackTargetStuckTicks;
+
     // Owns the currently-planned A* route toward whatever target the mode
     // above resolves to -- lives here (rather than as a MinebotMod field)
     // so it naturally gets discarded on clear()/setGoto()/setFollow(),
@@ -204,6 +220,20 @@ public final class ControlState {
         // Walk in close enough for BlockBreaker's own INTERACT_RANGE /
         // tickCollectEntity's COLLECT_MELEE_RANGE to take over from here
         // -- both are a few blocks, so 2.5 lands safely within either.
+        this.stopDistance = 2.5;
+        this.pathTracker.reset();
+        this.gotoArrived.reset();
+    }
+
+    /** Starts a !attack run -- null query means "nearest hostile", otherwise a specific entity type. See MinebotMod.tickAttack for the actual search/walk/melee loop. */
+    public void setAttack(final String query, final int radius) {
+        this.mode = Mode.ATTACK;
+        this.attackQuery = query;
+        this.attackRadius = radius;
+        this.attackHasTarget = false;
+        this.attackTargetStuckTicks = 0;
+        // Same reasoning as COLLECT's stopDistance -- walk in close
+        // enough for tickAttack's own melee range to take over.
         this.stopDistance = 2.5;
         this.pathTracker.reset();
         this.gotoArrived.reset();

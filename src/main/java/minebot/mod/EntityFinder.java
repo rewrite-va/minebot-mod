@@ -3,6 +3,7 @@ package minebot.mod;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
@@ -56,5 +57,39 @@ public final class EntityFinder {
 
     private static boolean matchesType(final Entity entity, final String entityType) {
         return BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString().equals(entityType);
+    }
+
+    /**
+     * Returns the nearest real hostile entity (implements the vanilla
+     * `Enemy` marker interface -- confirmed via decompiled source this is
+     * the correct general check, not `instanceof Monster`: most hostiles
+     * extend the abstract `Monster` class, which itself implements
+     * `Enemy`, but at least one real vanilla hostile (EnderDragon) is an
+     * `Enemy` without extending `Monster` at all, so checking the
+     * interface directly covers both without needing a second case)
+     * within `radius` blocks of `center` -- backs a bare `!attack` with
+     * no query, per PENDING.md's "!attack with no argument attacks the
+     * nearest hostile mob" ask. Same real-sphere-vs-AABB-box distance
+     * filtering as findNearestEntity above.
+     */
+    public static Entity findNearestHostile(final ClientLevel level, final Vec3 center, final double radius) {
+        AABB searchBox = AABB.ofSize(center, radius * 2, radius * 2, radius * 2);
+        double radiusSquared = radius * radius;
+
+        Entity nearest = null;
+        double nearestDistanceSquared = Double.MAX_VALUE;
+
+        for (Entity entity : level.getEntitiesOfClass(Entity.class, searchBox, e -> e instanceof Enemy)) {
+            double distanceSquared = entity.distanceToSqr(center);
+            if (distanceSquared > radiusSquared) {
+                continue;
+            }
+            if (distanceSquared < nearestDistanceSquared) {
+                nearest = entity;
+                nearestDistanceSquared = distanceSquared;
+            }
+        }
+
+        return nearest;
     }
 }

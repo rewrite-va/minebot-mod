@@ -178,9 +178,9 @@ public final class MinebotMod implements ClientModInitializer {
         // ticks actually spent looking at (and swinging at) the target.
         // ControlState.mode is the actual "is there a current goal"
         // signal -- IDLE is the only mode with nothing at all in
-        // progress (GOTO/FOLLOW/GIVE/DIG_DOWN/COLLECT all have a real goal,
-        // whether or not it happens to be setting yaw via MovementIntent
-        // this specific tick).
+        // progress (GOTO/FOLLOW/GIVE/DIG_DOWN/COLLECT/ATTACK all have a
+        // real goal, whether or not it happens to be setting yaw via
+        // MovementIntent this specific tick).
         if (intent.yaw == null && controlState.mode == ControlState.Mode.IDLE) {
             MovementIntent lookIntent = nearbyPlayerLookAt.resolve(player, level);
             if (lookIntent != null) {
@@ -198,6 +198,7 @@ public final class MinebotMod implements ClientModInitializer {
         maybeCompleteGive(player, level);
         tickDigDown(player, level);
         tickCollect(player, level);
+        tickAttack(player, level);
 
         respawnHandler.tick(player);
         if (player.isDeadOrDying()) {
@@ -721,6 +722,112 @@ public final class MinebotMod implements ClientModInitializer {
     }
 
     /**
+     * !attack / !kill: finds a target (nearest real hostile -- see
+     * EntityFinder.findNearestHostile -- if attackQuery is null, or the
+     * nearest entity of a specific type otherwise, same resolveNearest
+     * entity-lookup !find/!collect already use), walks to melee range via
+     * the normal GOTO-style pathfinding (resolveMovementIntent's ATTACK
+     * case, mirroring COLLECT's entity case exactly), and repeatedly
+     * calls the same real MultiPlayerGameMode.attack used by
+     * tickCollectEntity until the target dies or the attempt is
+     * abandoned. Reports attack_result exactly once, either way.
+     *
+     * Two ways to abandon an in-progress attack, per the explicit design
+     * ask that this be more than "chase and melee until dead":
+     * - ATTACK_LOW_HEALTH_FRACTION: the bot's own health drops to/below
+     *   this fraction of max -- self-preservation takes priority over
+     *   finishing a fight FoodEater's own auto-eat may not win in time
+     *   (e.g. no food carried, or hunger already full so eating is
+     *   gated off -- see FoodEater's own docstring). Checked every tick
+     *   this method runs, not just once, so a fight that starts safe but
+     *   turns bad partway through still aborts promptly.
+     * - ATTACK_TARGET_TIMEOUT_TICKS: same give-up-on-unreachable shape
+     *   COLLECT_TARGET_TIMEOUT_TICKS already established -- a target
+     *   that's fled out of pathfinding's reach, or is stuck behind
+     *   geometry the bot can't path around, shouldn't strand this
+     *   command forever.
+     */
+    private static final double ATTACK_MELEE_RANGE = 3.0;
+    private static final float ATTACK_LOW_HEALTH_FRACTION = 0.25f;
+    private static final int ATTACK_TARGET_TIMEOUT_TICKS = 200;
+
+    private void tickAttack(final LocalPlayer player, final ClientLevel level) {
+        if (controlState.mode != ControlState.Mode.ATTACK) {
+            return;
+        }
+
+        if (player.getHealth() <= player.getMaxHealth() * ATTACK_LOW_HEALTH_FRACTION) {
+            LOGGER.warn("attack: own health too low ({}/{}), abandoning to self-preserve", player.getHealth(), player.getMaxHealth());
+            String query = controlState.attackQuery;
+            controlState.clear();
+            broadcastAttackResultEvent(false, query, "had to retreat, health too low");
+            return;
+        }
+
+        if (!controlState.attackHasTarget) {
+            Entity target = controlState.attackQuery == null
+                ? EntityFinder.findNearestHostile(level, player.position(), controlState.attackRadius)
+                : resolveNearestEntityOnly(level, player, controlState.attackQuery, controlState.attackRadius);
+            if (target == null) {
+                String query = controlState.attackQuery;
+                controlState.clear();
+                broadcastAttackResultEvent(false, query, query == null ? "no hostiles found nearby" : "no more " + query + " found nearby");
+                return;
+            }
+            controlState.followEntityId = target.getId();
+            controlState.attackHasTarget = true;
+            controlState.attackTargetStuckTicks = 0;
+            controlState.pathTracker.reset();
+            LOGGER.info("attack: new target -- entity {} ({})", target.getId(), target.getType());
+            return; // resolveMovementIntent picks up the fresh target next tick
+        }
+
+        Entity target = level.getEntity(controlState.followEntityId);
+        if (target == null || target.isRemoved()) {
+            // Gone without us landing the kill (disconnected/despawned)
+            // -- still report success, same as tickCollectEntity: the
+            // fight is over either way, just not from our own blow.
+            String query = controlState.attackQuery;
+            controlState.clear();
+            broadcastAttackResultEvent(true, query, null);
+            return;
+        }
+
+        double dx = target.getX() - player.getX();
+        double dy = target.getY() - player.getY();
+        double dz = target.getZ() - player.getZ();
+        double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (distance > ATTACK_MELEE_RANGE) {
+            // Still walking there -- resolveMovementIntent's ATTACK case
+            // is driving that. Only counts as "stuck" (not just "still
+            // approaching") once this stays true for a long while, same
+            // as COLLECT's own give-up timeout.
+            if (++controlState.attackTargetStuckTicks > ATTACK_TARGET_TIMEOUT_TICKS) {
+                LOGGER.warn("attack: giving up, target unreachable after {} ticks", controlState.attackTargetStuckTicks);
+                String query = controlState.attackQuery;
+                controlState.clear();
+                broadcastAttackResultEvent(false, query, "couldn't reach the target");
+            }
+            return;
+        }
+
+        controlState.attackTargetStuckTicks = 0;
+        Minecraft.getInstance().gameMode.attack(player, target);
+        player.swing(InteractionHand.MAIN_HAND);
+        if (target.isRemoved()) {
+            String query = controlState.attackQuery;
+            controlState.clear();
+            broadcastAttackResultEvent(true, query, null);
+        }
+    }
+
+    /** Entity-only lookup (no block fallback) -- !attack <type> only ever means "fight that entity", never "mine that block". */
+    private static Entity resolveNearestEntityOnly(final ClientLevel level, final LocalPlayer player, final String query, final int radius) {
+        Identifier id = Identifier.parse(query.contains(":") ? query : "minecraft:" + query);
+        return EntityFinder.findNearestEntity(level, player.position(), id.toString(), radius);
+    }
+
+    /**
      * Generic query/query_result mechanism -- currently only backs
      * DropTable's drops_from/source_for lookups (see its own class
      * docstring for the real-loot-table-access gap this is a stopgap
@@ -883,6 +990,15 @@ public final class MinebotMod implements ClientModInitializer {
                 Entity followed = level.getEntity(controlState.followEntityId);
                 yield followed != null
                     ? new Double[]{followed.getX(), followed.getY(), followed.getZ()}
+                    : null;
+            }
+            case ATTACK -> {
+                if (!controlState.attackHasTarget) {
+                    yield null; // between targets -- tickAttack (called below) is what searches for one
+                }
+                Entity target1 = level.getEntity(controlState.followEntityId);
+                yield target1 != null
+                    ? new Double[]{target1.getX(), target1.getY(), target1.getZ()}
                     : null;
             }
             case COLLECT -> {
@@ -1129,7 +1245,8 @@ public final class MinebotMod implements ClientModInitializer {
         // waypoint/toBreak completely different from what
         // pathBlockBreaker was last actually digging -- nothing in this
         // method ever called tryBreak or stopBreaking() again for the
-        // stale target once that happened, so currentTarget stayed frozen
+        // stale target once that happened, so currentTarget (and its
+        // gizmo highlight, see BlockTargetVisualizer) stayed frozen
         // forever, isBusy() stayed true forever (blocking all movement,
         // see resolveMovementIntent's own blockedByDig gating), and the
         // bot just stood there -- visibly "targeting" a block it had
@@ -1137,8 +1254,8 @@ public final class MinebotMod implements ClientModInitializer {
         // output to explain why. This is the pathfinding-specific version
         // of the same "isBusy() can only ever be cleared by tryBreak, but
         // nothing keeps calling tryBreak" deadlock class already found
-        // and fixed for !dig/!debug -- see BlockBreaker.hasActiveTarget's
-        // own docstring.
+        // and fixed for !collect/!dig/!debug -- see BlockBreaker.
+        // hasActiveTarget's own docstring.
         BlockPos activeTarget = pathBlockBreaker.currentTarget();
         if (activeTarget != null && (waypoint == null || !waypoint.toBreak.contains(activeTarget))) {
             LOGGER.info(
@@ -1234,6 +1351,10 @@ public final class MinebotMod implements ClientModInitializer {
             case "debug_swap_test" -> withPlayer(this::runDebugSwapTest);
             case "collect" -> controlState.setCollect(
                 json.get("query").getAsString(),
+                json.has("radius") ? json.get("radius").getAsInt() : DEFAULT_FIND_RADIUS
+            );
+            case "attack" -> controlState.setAttack(
+                json.has("query") && !json.get("query").isJsonNull() ? json.get("query").getAsString() : null,
                 json.has("radius") ? json.get("radius").getAsInt() : DEFAULT_FIND_RADIUS
             );
             case "query" -> handleQuery(json);
@@ -1444,6 +1565,26 @@ public final class MinebotMod implements ClientModInitializer {
         event.addProperty("type", "collect_result");
         event.addProperty("success", success);
         event.addProperty("query", query);
+        if (reason != null) {
+            event.addProperty("reason", reason);
+        }
+        controlClient.sendEvent(event.toString());
+    }
+
+    /**
+     * Reports the outcome of a !attack/!kill run -- `success` is true
+     * once the target is actually dead (or gone without us landing the
+     * kill -- see tickAttack's own docstring for why that still counts).
+     * `reason` is present on failure (no target found, couldn't reach
+     * it, or had to retreat on low health).
+     */
+    private void broadcastAttackResultEvent(final boolean success, final String query, final String reason) {
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "attack_result");
+        event.addProperty("success", success);
+        if (query != null) {
+            event.addProperty("query", query);
+        }
         if (reason != null) {
             event.addProperty("reason", reason);
         }
