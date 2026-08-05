@@ -81,8 +81,26 @@ public final class BowShooter {
 
         if (!drawing) {
             drawing = true;
-            Minecraft.getInstance().gameMode.useItem(player, InteractionHand.MAIN_HAND);
             logDiagnostics(player, "starting draw");
+        }
+
+        if (!player.isUsingItem()) {
+            // Keep calling useItem() every tick until the server-synced
+            // "using item" flag actually confirms it took -- a single
+            // call isn't reliable enough on its own. Confirmed live
+            // (three separate real fights, same confirmed-correct build
+            // each time): calling this exactly once, only on the tick
+            // the draw starts, worked in one attempt out of several but
+            // left isUsingItem()/getTicksUsingItem() stuck at false/0
+            // forever in the others, with nothing else about the state
+            // ever looking wrong -- real client/server round-trip
+            // flakiness, not a logic bug, so this retries every tick
+            // instead of assuming the very first attempt landed. The
+            // original keyUse-keybind-hold approach got this resilience
+            // "for free" (Minecraft.handleKeybinds re-attempts every
+            // tick the key is still down); calling useItem() directly
+            // has to re-earn the same resilience explicitly.
+            Minecraft.getInstance().gameMode.useItem(player, InteractionHand.MAIN_HAND);
             return false;
         }
 
