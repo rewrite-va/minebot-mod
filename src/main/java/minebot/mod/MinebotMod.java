@@ -19,6 +19,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
@@ -873,14 +874,6 @@ public final class MinebotMod implements ClientModInitializer {
         WeaponSelector.Choice weapon = WeaponSelector.choose(player);
         boolean useBow = weapon != null && weapon.kind() == WeaponSelector.Kind.BOW;
         double engageRange = useBow ? ATTACK_BOW_RANGE : ATTACK_MELEE_RANGE;
-        // stopDistance drives resolveMovementIntent's ATTACK case (read
-        // there, not here) -- keeping it in sync with the currently
-        // chosen weapon's real range is what makes a bow user hold
-        // distance and shoot instead of walking all the way into melee
-        // range, and what makes running out of arrows immediately start
-        // closing the distance again rather than standing still at the
-        // old (now-wrong) bow range.
-        controlState.stopDistance = engageRange;
 
         if (weapon != null && player.getInventory().getSelectedSlot() != weapon.slot()) {
             InventoryActions.moveToHotbar(player, weapon.slot(), 8);
@@ -890,6 +883,58 @@ public final class MinebotMod implements ClientModInitializer {
         double dy = target.getY() - player.getY();
         double dz = target.getZ() - player.getZ();
         double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+        // Kiting: a bow user whose target has closed to melee range on
+        // its own (a hostile mob chasing the bot, unlike a stationary
+        // one) should back off and re-open bow range instead of
+        // standing there taking melee hits while trying to shoot.
+        // Reported live: a real fight took steady melee damage the whole
+        // time despite a bow being equipped and repeatedly drawing/
+        // releasing -- because nothing here ever backed away once the
+        // target got close, only ever "walk closer if farther than
+        // engageRange" existed. Retreats to a point ATTACK_BOW_RANGE
+        // directly away from the target along the current separation
+        // vector; falls back to the player's current facing direction if
+        // the target is standing exactly on top of the bot (a zero
+        // separation vector has no defined "away" direction).
+        if (useBow && distance < ATTACK_MELEE_RANGE) {
+            double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
+            double awayX;
+            double awayZ;
+            if (horizontalDistance > 1.0e-3) {
+                awayX = -dx / horizontalDistance;
+                awayZ = -dz / horizontalDistance;
+            } else {
+                double yawRad = Math.toRadians(player.getYRot());
+                awayX = Math.sin(yawRad);
+                awayZ = -Math.cos(yawRad);
+            }
+            if (!controlState.attackRetreating) {
+                LOGGER.info("attack: target closed to {} blocks (< melee range) while using a bow -- retreating", distance);
+            }
+            controlState.attackRetreating = true;
+            controlState.attackRetreatX = player.getX() + awayX * ATTACK_BOW_RANGE;
+            controlState.attackRetreatY = player.getY();
+            controlState.attackRetreatZ = player.getZ() + awayZ * ATTACK_BOW_RANGE;
+            // Walk all the way to the retreat point itself, not just
+            // "close enough" -- stopDistance here means "how close to
+            // the retreat point", not "how close to the target" the way
+            // it does for every other ATTACK case.
+            controlState.stopDistance = 0.5;
+            bowShooter.stop(player); // don't hold a draw while backing away -- resume shooting once actually at range
+            return;
+        }
+        controlState.attackRetreating = false;
+
+        // stopDistance drives resolveMovementIntent's ATTACK case (read
+        // there, not here) -- keeping it in sync with the currently
+        // chosen weapon's real range is what makes a bow user hold
+        // distance and shoot instead of walking all the way into melee
+        // range, and what makes running out of arrows immediately start
+        // closing the distance again rather than standing still at the
+        // old (now-wrong) bow range.
+        controlState.stopDistance = engageRange;
+
         if (distance > engageRange) {
             // Still walking there (or, for a bow, closing to bow range)
             // -- resolveMovementIntent's ATTACK case is driving that.
@@ -909,11 +954,15 @@ public final class MinebotMod implements ClientModInitializer {
         controlState.attackTargetStuckTicks = 0;
 
         if (useBow) {
-            bowShooter.tick(player, target); // draws/fires on its own schedule; nothing more to do here this tick either way
+            boolean released = bowShooter.tick(player, target); // draws/fires on its own schedule
+            if (released) {
+                LOGGER.info("attack: shot released -- {}", combatDebugSummary(player, target));
+            }
         } else {
             bowShooter.stop(player); // switched away from a bow (e.g. ran out of arrows) mid-draw -- don't leave keyUse stuck held
             Minecraft.getInstance().gameMode.attack(player, target);
             player.swing(InteractionHand.MAIN_HAND);
+            LOGGER.info("attack: melee swing -- {}", combatDebugSummary(player, target));
         }
 
         if (target.isRemoved()) {
@@ -948,6 +997,32 @@ public final class MinebotMod implements ClientModInitializer {
         float pitch = (float) -Math.toDegrees(Math.atan2(dy, horizontalDistance));
         player.setYRot(yaw);
         player.setXRot(pitch);
+    }
+
+    /**
+     * Debug summary logged alongside every real attack (shot released,
+     * or melee swing landed) -- target health (to confirm real damage is
+     * actually landing, not just the local animation/keybind side of the
+     * interaction) and the bot's own carried arrow count (to confirm
+     * whether a bow shot actually consumed one). Added chasing a live
+     * report where the bow's draw/release cycle completed correctly over
+     * and over, but the target's health never dropped and the arrow
+     * count never changed -- a real shot never actually left the bow
+     * despite every client-local signal (isUsingItem, getTicksUsingItem)
+     * looking correct.
+     */
+    private static String combatDebugSummary(final LocalPlayer player, final Entity target) {
+        String targetHealth = target instanceof LivingEntity livingTarget
+            ? String.valueOf(livingTarget.getHealth())
+            : "n/a (not a LivingEntity)";
+        int arrowCount = 0;
+        Inventory inventory = player.getInventory();
+        for (int slot = 0; slot < Inventory.INVENTORY_SIZE; slot++) {
+            if (inventory.getItem(slot).is(Items.ARROW)) {
+                arrowCount += inventory.getItem(slot).getCount();
+            }
+        }
+        return "target health=" + targetHealth + ", carried arrows=" + arrowCount;
     }
 
     /**
@@ -1162,6 +1237,13 @@ public final class MinebotMod implements ClientModInitializer {
             case ATTACK -> {
                 if (!controlState.attackHasTarget) {
                     yield null; // between targets -- tickAttack (called below) is what searches for one
+                }
+                if (controlState.attackRetreating) {
+                    // Kiting -- see ControlState.attackRetreating's own
+                    // docstring for why this is a field set by tickAttack
+                    // (which runs later this same tick) rather than
+                    // computed here directly.
+                    yield new Double[]{controlState.attackRetreatX, controlState.attackRetreatY, controlState.attackRetreatZ};
                 }
                 Entity target1 = level.getEntity(controlState.followEntityId);
                 yield target1 != null

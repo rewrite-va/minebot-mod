@@ -142,6 +142,21 @@ public final class ControlState {
     // or the target fled out of render distance) -- same give-up-and-
     // report-failure shape as collectTargetStuckTicks.
     public volatile int attackTargetStuckTicks;
+    // True for exactly the ticks tickAttack wants resolveMovementIntent's
+    // ATTACK case to walk toward attackRetreatX/Y/Z (a synthetic point
+    // away from the target) instead of the target's own raw position --
+    // set when a bow is the chosen weapon and the target has closed to
+    // within melee range on its own (kiting), so the bot backs off to
+    // re-open bow range instead of standing still taking melee hits
+    // while trying to shoot. Computed in MinebotMod.tickAttack (which
+    // owns weapon selection), consumed in resolveMovementIntent (which
+    // runs earlier the same tick, hence a field here rather than a
+    // return value -- same one-tick-lag shape stopDistance itself
+    // already has for the same reason).
+    public volatile boolean attackRetreating;
+    public volatile double attackRetreatX;
+    public volatile double attackRetreatY;
+    public volatile double attackRetreatZ;
 
     // Owns the currently-planned A* route toward whatever target the mode
     // above resolves to -- lives here (rather than as a MinebotMod field)
@@ -160,6 +175,7 @@ public final class ControlState {
         mode = Mode.IDLE;
         pathTracker.reset();
         gotoArrived.reset();
+        attackRetreating = false;
     }
 
     public void setGoto(final double x, final double y, final double z, final double stopDistance) {
@@ -232,6 +248,7 @@ public final class ControlState {
         this.attackRadius = radius;
         this.attackHasTarget = false;
         this.attackTargetStuckTicks = 0;
+        this.attackRetreating = false;
         // Same reasoning as COLLECT's stopDistance -- walk in close
         // enough for tickAttack's own melee range to take over.
         this.stopDistance = 2.5;
