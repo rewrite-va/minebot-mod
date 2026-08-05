@@ -7,7 +7,7 @@ import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.resources.Identifier;
 
 import java.time.Instant;
-import java.time.ZoneOffset;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 
@@ -20,17 +20,21 @@ import java.time.format.DateTimeParseException;
  * against any background.
  *
  * Includes BuildInfo.BUILT_AT (reformatted the same readable way as
- * minebot's own mod_version._format_built_at) so a stale-deployed-but-
- * not-yet-restarted client is visible at a glance in this same on-screen
- * line, not just in the backend's own log -- reported live repeatedly
- * that this line still just said "minebot: connected" with no version
- * of any kind after the backend-log-side format was changed, since that
- * was a completely separate string from this one.
+ * minebot's own mod_version._format_built_at, in Pacific time to match
+ * the user's own local clock -- confirmed live that a first attempt at
+ * this rendered in UTC read as "incorrect" at a glance) so a
+ * stale-deployed-but-not-yet-restarted client is visible at a glance in
+ * this same on-screen line, not just in the backend's own log --
+ * reported live repeatedly that this line still just said "minebot:
+ * connected" with no version of any kind after the backend-log-side
+ * format was changed, since that was a completely separate string from
+ * this one.
  */
 public final class StatusHud {
     private static final int COLOR_CONNECTED = 0xFF55FF55;
     private static final int COLOR_DISCONNECTED = 0xFFFF5555;
-    private static final DateTimeFormatter BUILT_AT_FORMAT = DateTimeFormatter.ofPattern("'v'yyyyMMdd HH.mm.ss").withZone(ZoneOffset.UTC);
+    private static final DateTimeFormatter BUILT_AT_FORMAT =
+        DateTimeFormatter.ofPattern("'v'yyyyMMdd HH.mm.ss").withZone(ZoneId.of("America/Los_Angeles"));
 
     private final ControlClient controlClient;
 
