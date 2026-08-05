@@ -14,6 +14,11 @@ import minebot.mod.pathfinding.BlockBreaker;
 import minebot.mod.pathfinding.BlockFinder;
 import minebot.mod.pathfinding.DoorOpener;
 import minebot.mod.pathfinding.Move;
+import minebot.mod.statemachine.Blackboard;
+import minebot.mod.statemachine.StateMachine;
+import minebot.mod.statemachine.TickContext;
+import minebot.mod.statemachine.general.GeneralState;
+import minebot.mod.statemachine.general.GeneralStateMachine;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
@@ -122,6 +127,16 @@ public final class MinebotMod implements ClientModInitializer {
     private final ItemDropTracker itemDropTracker = new ItemDropTracker();
     private final RespawnHandler respawnHandler = new RespawnHandler(this::broadcastDeathEvent, this::broadcastRespawnEvent);
     private final NearbyPlayerLookAt nearbyPlayerLookAt = new NearbyPlayerLookAt();
+    // First real piece of the peer-state-machine architecture described
+    // in STATE_MACHINE.md -- General SM currently has only an IDLE node
+    // (see GeneralStateMachine's own docstring for why), ticked every
+    // client tick alongside everything else below but not yet read or
+    // acted on by anything, purely to have a real, live, working
+    // StateMachine+Blackboard running before building the next axis on
+    // top of it. Legs/Hands/Head follow later, per STATE_MACHINE.md's
+    // "Implementation order".
+    private final Blackboard blackboard = new Blackboard();
+    private final StateMachine<GeneralState> generalStateMachine = GeneralStateMachine.create();
     private ControlClient controlClient;
     private float lastReportedHealth = -1;
 
@@ -198,6 +213,13 @@ public final class MinebotMod implements ClientModInitializer {
             lastBroadcastEntityPosition.clear();
             return;
         }
+
+        // See STATE_MACHINE.md's "Tick order" -- SMs tick before
+        // everything else touches player/level state this tick, and
+        // publish to the shared Blackboard for the next tick's
+        // conditions to read. Only General exists so far (IDLE-only,
+        // nothing reads it yet) -- Legs/Hands/Head follow later.
+        generalStateMachine.tick(new TickContext(player, level, blackboard));
 
         MovementIntent intent = resolveMovementIntent(player, level);
         if (!(player.input instanceof MinebotInput)) {
