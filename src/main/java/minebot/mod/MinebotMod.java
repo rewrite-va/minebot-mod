@@ -255,6 +255,12 @@ public final class MinebotMod implements ClientModInitializer {
             // progress at the moment of death would otherwise leave attack
             // stuck held through death/respawn.
             BlockBreaker.releaseAttackKeyIfHeld();
+            // BowShooter calls MultiPlayerGameMode.releaseUsingItem
+            // directly (no keybind involved, see its own docstring for
+            // why), but a draw left in progress at the moment of death
+            // should still be cleanly released rather than left as
+            // stale local state through respawn.
+            bowShooter.stop(player);
         } else {
             foodEater.maybeEat(player);
         }
@@ -815,7 +821,7 @@ public final class MinebotMod implements ClientModInitializer {
         if (player.getHealth() <= player.getMaxHealth() * ATTACK_LOW_HEALTH_FRACTION) {
             LOGGER.warn("attack: own health too low ({}/{}), abandoning to self-preserve", player.getHealth(), player.getMaxHealth());
             String query = controlState.attackQuery;
-            bowShooter.stop();
+            bowShooter.stop(player);
             controlState.clear();
             broadcastAttackResultEvent(false, query, "had to retreat, health too low");
             return;
@@ -845,7 +851,7 @@ public final class MinebotMod implements ClientModInitializer {
             // -- still report success, same as tickCollectEntity: the
             // fight is over either way, just not from our own blow.
             String query = controlState.attackQuery;
-            bowShooter.stop();
+            bowShooter.stop(player);
             controlState.clear();
             broadcastAttackResultEvent(true, query, null);
             return;
@@ -890,7 +896,7 @@ public final class MinebotMod implements ClientModInitializer {
             // Only counts as "stuck" (not just "still approaching") once
             // this stays true for a long while, same as COLLECT's own
             // give-up timeout.
-            bowShooter.stop(); // not in range to shoot -- don't leave a draw held while walking
+            bowShooter.stop(player); // not in range to shoot -- don't leave a draw held while walking
             if (++controlState.attackTargetStuckTicks > ATTACK_TARGET_TIMEOUT_TICKS) {
                 LOGGER.warn("attack: giving up, target unreachable after {} ticks", controlState.attackTargetStuckTicks);
                 String query = controlState.attackQuery;
@@ -905,14 +911,14 @@ public final class MinebotMod implements ClientModInitializer {
         if (useBow) {
             bowShooter.tick(player, target); // draws/fires on its own schedule; nothing more to do here this tick either way
         } else {
-            bowShooter.stop(); // switched away from a bow (e.g. ran out of arrows) mid-draw -- don't leave keyUse stuck held
+            bowShooter.stop(player); // switched away from a bow (e.g. ran out of arrows) mid-draw -- don't leave keyUse stuck held
             Minecraft.getInstance().gameMode.attack(player, target);
             player.swing(InteractionHand.MAIN_HAND);
         }
 
         if (target.isRemoved()) {
             String query = controlState.attackQuery;
-            bowShooter.stop();
+            bowShooter.stop(player);
             controlState.clear();
             broadcastAttackResultEvent(true, query, null);
         }
