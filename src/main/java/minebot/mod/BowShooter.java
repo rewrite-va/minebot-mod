@@ -53,9 +53,22 @@ public final class BowShooter {
     // faster, weaker partial-draw shots.
     private static final int FULL_DRAW_TICKS = 20;
 
+    // How long a single shot attempt gets before giving up on it and
+    // starting a completely fresh one -- confirmed live that the real
+    // server-synced "using item" state can drop out silently partway
+    // through a draw (isUsingItem() confirms true once, then reverts to
+    // false permanently, getTicksUsingItem() stuck at 0 forever after
+    // that with no further error/signal of any kind) with no way to
+    // resume the same attempt once that happens. Double FULL_DRAW_TICKS
+    // -- generous enough that a real, merely-slow confirmation round
+    // trip never trips this, bounded so a genuinely stalled attempt
+    // doesn't strand the fight forever.
+    private static final int STALLED_ATTEMPT_TIMEOUT_TICKS = FULL_DRAW_TICKS * 2;
+
     private boolean drawing;
     private int ticksWaitingForUseItemConfirm;
     private boolean everConfirmedUsing;
+    private int ticksSinceDrawStarted;
 
     /**
      * Aims at `target`, starts (or continues) the draw, and releases
@@ -85,6 +98,7 @@ public final class BowShooter {
             drawing = true;
             ticksWaitingForUseItemConfirm = 0;
             everConfirmedUsing = false;
+            ticksSinceDrawStarted = 0;
             Minecraft.getInstance().gameMode.useItem(player, InteractionHand.MAIN_HAND);
             logDiagnostics(player, "starting draw");
             // Deliberately falls through to the isUsingItem() check right
@@ -101,6 +115,26 @@ public final class BowShooter {
             // unset, retried useItem() -- which restarts a real
             // in-progress draw instead of extending it, producing the
             // exact "spammed every tick, vibrating" loop reported live.
+        }
+
+        if (++ticksSinceDrawStarted > STALLED_ATTEMPT_TIMEOUT_TICKS) {
+            // This one attempt has gone on too long with nothing to show
+            // for it -- confirmed live: the real server-synced "using
+            // item" state can silently drop out partway through a draw
+            // (isUsingItem() confirms true once, then reverts to false
+            // permanently, getTicksUsingItem() stuck at 0 forever after)
+            // with no further signal of any kind that anything went
+            // wrong. Rather than wait forever for a round trip that's
+            // never coming, release whatever local state might be stuck
+            // and start a genuinely fresh attempt -- same target, same
+            // aim, but a brand new useItem() call and a clean
+            // everConfirmedUsing/ticksWaitingForUseItemConfirm slate.
+            MinebotMod.LOGGER.warn(
+                "bow: attempt stalled after {} ticks with no confirmed progress -- starting a fresh attempt", ticksSinceDrawStarted
+            );
+            Minecraft.getInstance().gameMode.releaseUsingItem(player);
+            drawing = false;
+            return false; // next tick's !drawing branch starts clean
         }
 
         if (player.isUsingItem()) {
