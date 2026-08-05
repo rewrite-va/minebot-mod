@@ -55,6 +55,7 @@ public final class BowShooter {
 
     private boolean drawing;
     private int ticksWaitingForUseItemConfirm;
+    private boolean everConfirmedUsing;
 
     /**
      * Aims at `target`, starts (or continues) the draw, and releases
@@ -83,25 +84,29 @@ public final class BowShooter {
         if (!drawing) {
             drawing = true;
             ticksWaitingForUseItemConfirm = 0;
+            everConfirmedUsing = false;
+            Minecraft.getInstance().gameMode.useItem(player, InteractionHand.MAIN_HAND);
             logDiagnostics(player, "starting draw");
+            return false;
         }
 
-        if (!player.isUsingItem()) {
-            // Keep calling useItem() every tick until the server-synced
-            // "using item" flag actually confirms it took -- a single
-            // call isn't reliable enough on its own. Confirmed live
-            // (three separate real fights, same confirmed-correct build
-            // each time): calling this exactly once, only on the tick
-            // the draw starts, worked in one attempt out of several but
-            // left isUsingItem()/getTicksUsingItem() stuck at false/0
-            // forever in the others, with nothing else about the state
-            // ever looking wrong -- real client/server round-trip
-            // flakiness, not a logic bug, so this retries every tick
-            // instead of assuming the very first attempt landed. The
-            // original keyUse-keybind-hold approach got this resilience
-            // "for free" (Minecraft.handleKeybinds re-attempts every
-            // tick the key is still down); calling useItem() directly
-            // has to re-earn the same resilience explicitly.
+        if (player.isUsingItem()) {
+            everConfirmedUsing = true;
+        } else if (!everConfirmedUsing) {
+            // Retry useItem() only until the draw is confirmed at least
+            // once, not every tick unconditionally -- confirmed live
+            // that calling useItem() again *while a real draw is already
+            // in progress* restarts it instead of extending it (the
+            // user's own report: "the bow being spammed every tick, like
+            // vibrating" -- a real, visible re-trigger loop, not just a
+            // logging artifact). isUsingItem() itself flickers false for
+            // a tick or two around the initial client/server round trip
+            // even on a draw that ultimately succeeds, so a single
+            // missed confirmation isn't proof the first useItem() call
+            // never landed -- only retry while it has *never once* been
+            // seen true since this draw started; once confirmed even
+            // one time, a later isUsingItem()==false tick just means the
+            // draw is still settling, not that it needs restarting.
             Minecraft.getInstance().gameMode.useItem(player, InteractionHand.MAIN_HAND);
             ticksWaitingForUseItemConfirm++;
             if (ticksWaitingForUseItemConfirm % 5 == 0) {
