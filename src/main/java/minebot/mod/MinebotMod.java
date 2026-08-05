@@ -199,23 +199,12 @@ public final class MinebotMod implements ClientModInitializer {
             return;
         }
 
-        // TEMPORARY: gutted to ONLY tickAttack (which itself only sets
-        // aim/hotbar/draws the bow) -- no MinebotInput swap, no
-        // resolveMovementIntent, no automatic look, no movement/mining/
-        // give/collect/respawn/broadcast systems at all -- to isolate
-        // the bow-never-fires investigation in the most extreme way
-        // possible per explicit direction ("no movement anymore,
-        // nothing, no automatic look, nothing, only !kill"). Disabling
-        // FoodEater alone did NOT fix it (confirmed live), so this
-        // strips everything else too. Restore the commented-out block
-        // below (and MinebotMod's other now-dead imports if any) once
-        // the bow is confirmed working in this stripped-down state, one
-        // piece at a time, to find out which specific thing was really
-        // interfering (see FINDINGS.md's "Bow-drawing never actually
-        // fired an arrow" section).
-        tickAttack(player, level);
+        MovementIntent intent = resolveMovementIntent(player, level);
+        if (!(player.input instanceof MinebotInput)) {
+            player.input = new MinebotInput(new KeyboardInput(client.options));
+        }
+        ((MinebotInput) player.input).setIntent(intent);
 
-        /*
         // Only look at a nearby player while genuinely idle (no goal at
         // all) -- checking intent.yaw == null alone isn't enough:
         // BlockBreaker.aimAt sets yaw/pitch *directly* on the player
@@ -239,9 +228,17 @@ public final class MinebotMod implements ClientModInitializer {
             }
         }
 
+        if (intent.yaw != null) {
+            player.setYRot(intent.yaw);
+        }
+        if (intent.pitch != null) {
+            player.setXRot(intent.pitch);
+        }
+
         maybeCompleteGive(player, level);
         tickDigDown(player, level);
         tickCollect(player, level);
+        tickAttack(player, level);
 
         respawnHandler.tick(player);
         if (player.isDeadOrDying()) {
@@ -266,25 +263,9 @@ public final class MinebotMod implements ClientModInitializer {
             // stale local state through respawn.
             bowShooter.stop(player);
         } else {
-            // Temporarily disabled -- root-caused live (see git history)
-            // that FoodEater.maybeEat() holding the real keyUse keybind
-            // down every tick it has food to eat (unconditionally,
-            // regardless of ControlState.mode) was silently fighting
-            // over that same real keybind with BowShooter's draw calls,
-            // and even with a human's own manual right-click, since
-            // nothing in this mod currently arbitrates "who owns keyUse
-            // this tick" between independent systems that can each want
-            // it at once. Confirmed live: removing minebot-mod entirely
-            // let manual bow-draw work normally again, isolating the
-            // conflict to something in this mod, not the server/account.
-            // Re-enable once there's a real single-owner arbitrator for
-            // shared input state (keyUse/keyAttack) across FoodEater/
-            // BlockBreaker/BowShooter -- see PENDING.md.
-            // foodEater.maybeEat(player);
+            foodEater.maybeEat(player);
         }
-        */
 
-        /*
         maybeBroadcastPositionEvent(player);
         broadcastEntityEvents(player, level);
         inventoryReporter.maybeBroadcast(player.getInventory(), controlClient);
@@ -295,7 +276,6 @@ public final class MinebotMod implements ClientModInitializer {
             lastReportedHealth = health;
             broadcastHealthEvent(health);
         }
-        */
     }
 
     /**
