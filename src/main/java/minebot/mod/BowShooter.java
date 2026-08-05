@@ -52,22 +52,53 @@ public final class BowShooter {
             // Something else took over the main hand mid-draw (a tool
             // switch elsewhere, !give, ...) -- abandon this shot cleanly
             // rather than holding keyUse against whatever's now selected.
+            if (drawing) {
+                MinebotMod.LOGGER.info(
+                    "bow: main hand no longer a bow ({}) mid-draw -- abandoning shot", player.getMainHandItem().getItem()
+                );
+            }
             stop();
             return false;
         }
 
         aimAt(player, target);
 
+        // Held every tick the draw should continue, not just once on the
+        // first tick -- mirrors FoodEater.holdUseKey's own docstring
+        // ("idempotent to call every tick while eating should continue")
+        // exactly, rather than assuming the keybind stays down on its
+        // own once set. real-input-driven interactions in this mod have
+        // already shown once (FoodEater's own investigation) that
+        // subtleties here can silently break the interaction with
+        // nothing else about the state looking wrong.
+        holdUseKey();
+
         if (!drawing) {
             drawing = true;
-            holdUseKey();
+            MinebotMod.LOGGER.info(
+                "bow: starting draw (isUsingItem={}, usedItemHand={})", player.isUsingItem(), player.getUsedItemHand()
+            );
             return false;
         }
 
-        if (player.getTicksUsingItem() < FULL_DRAW_TICKS) {
+        int ticksUsing = player.getTicksUsingItem();
+        if (ticksUsing < FULL_DRAW_TICKS) {
+            // At info (temporarily, same reasoning BlockBreaker's own
+            // tool-switch logging gives -- this client's default log4j
+            // config filters debug output entirely), but only every few
+            // ticks, not every single one -- this exists specifically to
+            // make a stuck draw observable (found live: a real !kill
+            // shot silently never completed, with nothing at all in the
+            // log to explain why), not to spam a line 20 times per shot.
+            if (ticksUsing % 5 == 0) {
+                MinebotMod.LOGGER.info(
+                    "bow: drawing, {} / {} ticks (isUsingItem={})", ticksUsing, FULL_DRAW_TICKS, player.isUsingItem()
+                );
+            }
             return false;
         }
 
+        MinebotMod.LOGGER.info("bow: full draw reached, releasing");
         releaseUseKey();
         drawing = false;
         return true;
