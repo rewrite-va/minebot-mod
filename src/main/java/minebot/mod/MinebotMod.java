@@ -851,6 +851,19 @@ public final class MinebotMod implements ClientModInitializer {
             return;
         }
 
+        // Always look straight at the target while fighting -- regardless
+        // of whether this tick is walking toward it (resolveMovementIntent's
+        // ATTACK case, called earlier this same tick, aims at the next
+        // pathfinding waypoint instead) or standing still meleeing/shooting.
+        // Reported live: the bot kept looking toward its own walking
+        // waypoints instead of the thing it was actually fighting. Runs
+        // after resolveMovementIntent's own player.setYRot/setXRot calls
+        // (see onClientTick's ordering), so this always wins, the same
+        // "aim set directly on the player always overrides whatever
+        // MovementIntent set earlier the same tick" pattern BlockBreaker.
+        // aimAt/BowShooter.aimAt already establish for mining/shooting.
+        aimAtEntity(player, target);
+
         WeaponSelector.Choice weapon = WeaponSelector.choose(player);
         boolean useBow = weapon != null && weapon.kind() == WeaponSelector.Kind.BOW;
         double engageRange = useBow ? ATTACK_BOW_RANGE : ATTACK_MELEE_RANGE;
@@ -909,6 +922,26 @@ public final class MinebotMod implements ClientModInitializer {
     private static Entity resolveNearestEntityOnly(final ClientLevel level, final LocalPlayer player, final String query, final int radius) {
         Identifier id = Identifier.parse(query.contains(":") ? query : "minecraft:" + query);
         return EntityFinder.findNearestEntity(level, player.position(), id.toString(), radius);
+    }
+
+    /**
+     * Plain, flat aim straight at `target`'s eye level -- deliberately
+     * not BowShooter.aimAt's arc-lifted version (that's specifically
+     * tuned for real arrow ballistics at range, not "look at the thing
+     * I'm fighting"). Same atan2-based yaw/pitch convention already
+     * established in NearbyPlayerLookAt/BlockBreaker.aimAt/BowShooter.aimAt
+     * (all confirmed via decompiled Entity.calculateViewVector).
+     */
+    private static void aimAtEntity(final LocalPlayer player, final Entity target) {
+        double dx = target.getX() - player.getX();
+        double dz = target.getZ() - player.getZ();
+        double dy = target.getEyeY() - player.getEyeY();
+        double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
+
+        float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        float pitch = (float) -Math.toDegrees(Math.atan2(dy, horizontalDistance));
+        player.setYRot(yaw);
+        player.setXRot(pitch);
     }
 
     /**
