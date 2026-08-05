@@ -31,6 +31,32 @@ import net.minecraft.world.item.BowItem;
  * calling useItem() directly here sidesteps the hitResult-based
  * branching entirely, which is exactly the problem.
  *
+ * Draw timing is tracked locally (our own tick counter), not via
+ * LocalPlayer.isUsingItem()/getTicksUsingItem() -- confirmed via
+ * decompiled LivingEntity.startUsingItem/stopUsingItem that the
+ * DATA_LIVING_ENTITY_FLAGS bit those methods read is only ever set
+ * locally when `!level().isClientSide()`, i.e. never by the local
+ * player's own client-side prediction; it only becomes true once the
+ * server independently processes our ServerboundUseItemPacket and
+ * syncs the flag back down. Confirmed live this round trip is far too
+ * unreliable to drive real draw timing on: isUsingItem() would confirm
+ * true for exactly one tick after useItem() and then permanently
+ * revert false for the rest of the attempt, every single attempt, with
+ * total consistency (not a flaky/occasional drop). Inspecting a known
+ * -working reference mod (MC_Instant-Shoot_Mod, a BowItem.use() mixin
+ * that calls BowItem.releaseUsing(stack, level, player, 72000 - 20)
+ * directly for an instant full-power shot) confirmed the real
+ * server-side shot doesn't actually depend on the client ever
+ * observing isUsingItem() go true at all -- the server runs its own
+ * independent copy of the draw/release state machine from the same
+ * ServerboundUseItemPacket/ServerboundPlayerActionPacket(RELEASE_USE_ITEM)
+ * pair MultiPlayerGameMode.useItem()/releaseUsingItem() already send;
+ * the synced flag on our own client is just a display-ish echo of that,
+ * not a precondition for it. So: send useItem() once, count our own
+ * FULL_DRAW_TICKS locally, then call releaseUsingItem() -- the real
+ * client/server exchange those two calls trigger is what fires the
+ * shot, regardless of what isUsingItem() ever reports back to us.
+ *
  * Aim direction is ported directly from AbstractSkeleton.performRangedAttack
  * (confirmed via decompiled 26.1.2 source) rather than solving real
  * projectile ballistics from scratch: vanilla's own ranged-mob AI doesn't
@@ -50,24 +76,12 @@ public final class BowShooter {
     // BowItem.MAX_DRAW_DURATION -- holding this long reaches
     // getPowerForTime's max (1.0), a full-strength/full-accuracy shot,
     // matching the explicit ask to always fully draw rather than firing
-    // faster, weaker partial-draw shots.
+    // faster, weaker partial-draw shots. Counted locally now (see class
+    // docstring), not read back from the server-synced
+    // getTicksUsingItem().
     private static final int FULL_DRAW_TICKS = 20;
 
-    // How long a single shot attempt gets before giving up on it and
-    // starting a completely fresh one -- confirmed live that the real
-    // server-synced "using item" state can drop out silently partway
-    // through a draw (isUsingItem() confirms true once, then reverts to
-    // false permanently, getTicksUsingItem() stuck at 0 forever after
-    // that with no further error/signal of any kind) with no way to
-    // resume the same attempt once that happens. Double FULL_DRAW_TICKS
-    // -- generous enough that a real, merely-slow confirmation round
-    // trip never trips this, bounded so a genuinely stalled attempt
-    // doesn't strand the fight forever.
-    private static final int STALLED_ATTEMPT_TIMEOUT_TICKS = FULL_DRAW_TICKS * 2;
-
     private boolean drawing;
-    private int ticksWaitingForUseItemConfirm;
-    private boolean everConfirmedUsing;
     private int ticksSinceDrawStarted;
 
     /**
@@ -96,82 +110,15 @@ public final class BowShooter {
 
         if (!drawing) {
             drawing = true;
-            ticksWaitingForUseItemConfirm = 0;
-            everConfirmedUsing = false;
             ticksSinceDrawStarted = 0;
             Minecraft.getInstance().gameMode.useItem(player, InteractionHand.MAIN_HAND);
             logDiagnostics(player, "starting draw");
-            // Deliberately falls through to the isUsingItem() check right
-            // below instead of returning here -- a real, if momentary,
-            // client-side prediction can make isUsingItem() true on this
-            // exact same tick (confirmed live: "starting draw" itself
-            // logged isUsingItem=true), and that must be allowed to set
-            // everConfirmedUsing immediately. An early return here used
-            // to skip that check entirely on the very first tick, so
-            // everConfirmedUsing stayed false even when this tick's own
-            // prediction was already true -- the very next tick then saw
-            // isUsingItem() revert to false (never actually confirmed by
-            // the server) and, since everConfirmedUsing was still
-            // unset, retried useItem() -- which restarts a real
-            // in-progress draw instead of extending it, producing the
-            // exact "spammed every tick, vibrating" loop reported live.
         }
 
-        if (++ticksSinceDrawStarted > STALLED_ATTEMPT_TIMEOUT_TICKS) {
-            // This one attempt has gone on too long with nothing to show
-            // for it -- confirmed live: the real server-synced "using
-            // item" state can silently drop out partway through a draw
-            // (isUsingItem() confirms true once, then reverts to false
-            // permanently, getTicksUsingItem() stuck at 0 forever after)
-            // with no further signal of any kind that anything went
-            // wrong. Rather than wait forever for a round trip that's
-            // never coming, release whatever local state might be stuck
-            // and start a genuinely fresh attempt -- same target, same
-            // aim, but a brand new useItem() call and a clean
-            // everConfirmedUsing/ticksWaitingForUseItemConfirm slate.
-            MinebotMod.LOGGER.warn(
-                "bow: attempt stalled after {} ticks with no confirmed progress -- starting a fresh attempt", ticksSinceDrawStarted
-            );
-            Minecraft.getInstance().gameMode.releaseUsingItem(player);
-            drawing = false;
-            return false; // next tick's !drawing branch starts clean
-        }
-
-        if (player.isUsingItem()) {
-            everConfirmedUsing = true;
-        } else if (!everConfirmedUsing) {
-            // Retry useItem() only until the draw is confirmed at least
-            // once, not every tick unconditionally -- confirmed live
-            // that calling useItem() again *while a real draw is already
-            // in progress* restarts it instead of extending it (the
-            // user's own report: "the bow being spammed every tick, like
-            // vibrating" -- a real, visible re-trigger loop, not just a
-            // logging artifact). isUsingItem() itself flickers false for
-            // a tick or two around the initial client/server round trip
-            // even on a draw that ultimately succeeds, so a single
-            // missed confirmation isn't proof the first useItem() call
-            // never landed -- only retry while it has *never once* been
-            // seen true since this draw started; once confirmed even
-            // one time, a later isUsingItem()==false tick just means the
-            // draw is still settling, not that it needs restarting.
-            Minecraft.getInstance().gameMode.useItem(player, InteractionHand.MAIN_HAND);
-            ticksWaitingForUseItemConfirm++;
-            if (ticksWaitingForUseItemConfirm % 5 == 0) {
-                logDiagnostics(player, "still waiting for isUsingItem to confirm, retried " + ticksWaitingForUseItemConfirm + " times");
-            }
-            return false;
-        }
-
-        int ticksUsing = player.getTicksUsingItem();
-        if (ticksUsing < FULL_DRAW_TICKS) {
-            // At info (temporarily, same reasoning BlockBreaker's own
-            // tool-switch logging gives -- this client's default log4j
-            // config filters debug output entirely), but only every few
-            // ticks, not every single one -- kept from the investigation
-            // that found the real cause above, to make any future
-            // regression here immediately observable instead of silent.
-            if (ticksUsing % 5 == 0) {
-                logDiagnostics(player, "drawing, " + ticksUsing + " / " + FULL_DRAW_TICKS + " ticks");
+        ticksSinceDrawStarted++;
+        if (ticksSinceDrawStarted < FULL_DRAW_TICKS) {
+            if (ticksSinceDrawStarted % 5 == 0) {
+                logDiagnostics(player, "drawing, " + ticksSinceDrawStarted + " / " + FULL_DRAW_TICKS + " ticks");
             }
             return false;
         }
