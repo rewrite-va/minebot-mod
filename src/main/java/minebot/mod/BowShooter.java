@@ -87,7 +87,20 @@ public final class BowShooter {
             everConfirmedUsing = false;
             Minecraft.getInstance().gameMode.useItem(player, InteractionHand.MAIN_HAND);
             logDiagnostics(player, "starting draw");
-            return false;
+            // Deliberately falls through to the isUsingItem() check right
+            // below instead of returning here -- a real, if momentary,
+            // client-side prediction can make isUsingItem() true on this
+            // exact same tick (confirmed live: "starting draw" itself
+            // logged isUsingItem=true), and that must be allowed to set
+            // everConfirmedUsing immediately. An early return here used
+            // to skip that check entirely on the very first tick, so
+            // everConfirmedUsing stayed false even when this tick's own
+            // prediction was already true -- the very next tick then saw
+            // isUsingItem() revert to false (never actually confirmed by
+            // the server) and, since everConfirmedUsing was still
+            // unset, retried useItem() -- which restarts a real
+            // in-progress draw instead of extending it, producing the
+            // exact "spammed every tick, vibrating" loop reported live.
         }
 
         if (player.isUsingItem()) {
