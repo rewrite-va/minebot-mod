@@ -23,8 +23,12 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -881,6 +885,50 @@ public final class MinebotMod implements ClientModInitializer {
         Minecraft.getInstance().execute(() -> runFind(query, radius));
     }
 
+    /**
+     * !save chest <name>: finds the chest block a given *tracked* player
+     * (not necessarily the bot itself) is currently looking at -- backs
+     * "!save chest a" meaning "remember the chest I (the caller) am
+     * looking at", not whatever chest the bot happens to be near. See
+     * LookingAt's own docstring for why raycasting from another tracked
+     * player's eyes (not just the bot's own) is a real, correct operation
+     * here, not a hack.
+     *
+     * Same thread-hop as handleFind -- iterating live entities/chunks off
+     * the tick thread is unsafe.
+     */
+    private void handleFindChest(final int entityId) {
+        Minecraft.getInstance().execute(() -> runFindChest(entityId));
+    }
+
+    // Matches BlockBreaker/DoorOpener's own real-interaction-reach
+    // convention -- a chest the caller is looking at from further away
+    // than a real player could actually interact with isn't a sensible
+    // "the chest I'm looking at" answer.
+    private static final double FIND_CHEST_MAX_DISTANCE = 4.5;
+
+    private void runFindChest(final int entityId) {
+        ClientLevel level = Minecraft.getInstance().level;
+        if (level == null) {
+            broadcastFindChestResultEvent(false, 0, 0, 0);
+            return;
+        }
+        Entity looker = level.getEntity(entityId);
+        if (looker == null) {
+            LOGGER.warn("find_chest: entity {} not currently visible", entityId);
+            broadcastFindChestResultEvent(false, 0, 0, 0);
+            return;
+        }
+
+        BlockPos pos = LookingAt.blockPos(looker, level, FIND_CHEST_MAX_DISTANCE);
+        if (pos == null || !(level.getBlockState(pos).getBlock() instanceof ChestBlock)) {
+            broadcastFindChestResultEvent(false, 0, 0, 0);
+            return;
+        }
+
+        broadcastFindChestResultEvent(true, pos.getX(), pos.getY(), pos.getZ());
+    }
+
     private void runFind(final String query, final int radius) {
         LocalPlayer player = Minecraft.getInstance().player;
         ClientLevel level = Minecraft.getInstance().level;
@@ -1347,6 +1395,7 @@ public final class MinebotMod implements ClientModInitializer {
                 json.get("query").getAsString(),
                 json.has("radius") ? json.get("radius").getAsInt() : DEFAULT_FIND_RADIUS
             );
+            case "find_chest" -> handleFindChest(json.get("entity_id").getAsInt());
             case "dig_down" -> controlState.setDigDown(json.get("count").getAsInt());
             case "debug_swap_test" -> withPlayer(this::runDebugSwapTest);
             case "collect" -> controlState.setCollect(
@@ -1504,6 +1553,25 @@ public final class MinebotMod implements ClientModInitializer {
     private void broadcastArrivedEvent() {
         JsonObject event = new JsonObject();
         event.addProperty("type", "arrived");
+        controlClient.sendEvent(event.toString());
+    }
+
+    /**
+     * Reports the outcome of a `find_chest` command -- x/y/z (the
+     * chest's real BlockPos, not a hit-location fraction) are only
+     * meaningful when found=true. Fire-and-forget, same one-in-flight-
+     * at-a-time reasoning as find_result (!save is a chat command,
+     * dispatched one at a time).
+     */
+    private void broadcastFindChestResultEvent(final boolean found, final int x, final int y, final int z) {
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "find_chest_result");
+        event.addProperty("found", found);
+        if (found) {
+            event.addProperty("x", x);
+            event.addProperty("y", y);
+            event.addProperty("z", z);
+        }
         controlClient.sendEvent(event.toString());
     }
 
