@@ -253,6 +253,20 @@ public final class MinebotMod implements ClientModInitializer {
             return;
         }
 
+        NearestMatch match = resolveNearest(level, player, query, radius);
+        if (match == null) {
+            boolean recognized = isRecognizedType(query);
+            broadcastFindResultEvent(query, false, recognized, "entity", 0, 0, 0);
+            return;
+        }
+        broadcastFindResultEvent(query, true, true, match.kind, match.x, match.y, match.z);
+    }
+
+    /** entity type first, block type as fallback -- same registry-membership check as !find (see isRecognizedType). */
+    private record NearestMatch(String kind, double x, double y, double z, Entity entity, BlockPos block) {
+    }
+
+    private static boolean isRecognizedType(final String query) {
         // BLOCK/ENTITY_TYPE are DefaultedRegistry -- looking up an unknown
         // key silently falls back to a default (air / pig) instead of
         // failing, so a genuinely unrecognized query (a typo, or a word
@@ -263,22 +277,31 @@ public final class MinebotMod implements ClientModInitializer {
         // no allay around). containsKey checks real registry membership,
         // independent of the defaulting behavior.
         Identifier id = Identifier.parse(query.contains(":") ? query : "minecraft:" + query);
-        boolean recognized = BuiltInRegistries.ENTITY_TYPE.containsKey(id) || BuiltInRegistries.BLOCK.containsKey(id);
+        return BuiltInRegistries.ENTITY_TYPE.containsKey(id) || BuiltInRegistries.BLOCK.containsKey(id);
+    }
+
+    /**
+     * Shared entity-then-block resolution behind !find -- tries `query` as
+     * an entity type first, falling back to a block type ("cow" has no
+     * block type, "stone" has no entity type, so trying entity first and
+     * falling back to block covers both without the caller needing to know
+     * which kind of thing it's asking for).
+     */
+    private static NearestMatch resolveNearest(final ClientLevel level, final LocalPlayer player, final String query, final int radius) {
+        Identifier id = Identifier.parse(query.contains(":") ? query : "minecraft:" + query);
 
         Entity entity = EntityFinder.findNearestEntity(level, player.position(), id.toString(), radius);
         if (entity != null) {
-            broadcastFindResultEvent(query, true, recognized, "entity", entity.getX(), entity.getY(), entity.getZ());
-            return;
+            return new NearestMatch("entity", entity.getX(), entity.getY(), entity.getZ(), entity, null);
         }
 
         BlockPos center = player.blockPosition();
         BlockPos block = BlockFinder.findNearestBlock(level, center, id.toString(), radius);
         if (block != null) {
-            broadcastFindResultEvent(query, true, recognized, "block", block.getX() + 0.5, block.getY(), block.getZ() + 0.5);
-            return;
+            return new NearestMatch("block", block.getX() + 0.5, block.getY(), block.getZ() + 0.5, null, block);
         }
 
-        broadcastFindResultEvent(query, false, recognized, "entity", 0, 0, 0);
+        return null;
     }
 
     /**
