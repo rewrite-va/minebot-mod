@@ -151,6 +151,25 @@ public final class BowShooter {
             Minecraft.getInstance().gameMode.useItem(player, InteractionHand.MAIN_HAND);
             logDiagnostics(player, "starting draw");
         }
+        // Root cause, finally confirmed via decompiled Minecraft.
+        // handleKeybinds() bytecode: vanilla itself runs, every tick
+        // screen == null (normal gameplay, no GUI open) -- confirmed
+        // live that opening ANY screen, even just the inventory or the
+        // ESC menu, let the bow draw/fire normally in the background --
+        // `if (player.isUsingItem() && !options.keyUse.isDown())
+        // gameMode.releaseUsingItem(player)`. This is vanilla's own
+        // safety net for a real player letting go of right-click (or
+        // losing window focus) mid-use. Since nothing here ever called
+        // keyUse.setDown(true), keyUse.isDown() was always false, so
+        // vanilla force-released our draw itself, unconditionally,
+        // every tick isUsingItem() was ever true -- exactly the
+        // "confirms true for one tick, then permanently reverts false"
+        // pattern chased through this whole investigation. Holding this
+        // down for the draw's duration doesn't trigger anything by
+        // itself (useItem()/releaseUsing() above/below still do the
+        // real work) -- it only stops vanilla's own handleKeybinds from
+        // undoing it.
+        Minecraft.getInstance().options.keyUse.setDown(true);
 
         ticksSinceDrawStarted++;
         if (ticksSinceDrawStarted < FULL_DRAW_TICKS) {
@@ -183,6 +202,7 @@ public final class BowShooter {
      * releaseUsingItem()'s own local half can't be relied on here.
      */
     private static void release(final LocalPlayer player, final int ticksHeld) {
+        Minecraft.getInstance().options.keyUse.setDown(false);
         Minecraft.getInstance().gameMode.releaseUsingItem(player);
         ItemStack bow = player.getMainHandItem();
         if (bow.getItem() instanceof BowItem bowItem) {
