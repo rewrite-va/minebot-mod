@@ -764,12 +764,22 @@ public final class MinebotMod implements ClientModInitializer {
      * !attack / !kill: finds a target (nearest real hostile -- see
      * EntityFinder.findNearestHostile -- if attackQuery is null, or the
      * nearest entity of a specific type otherwise, same resolveNearest
-     * entity-lookup !find/!collect already use), walks to melee range via
-     * the normal GOTO-style pathfinding (resolveMovementIntent's ATTACK
-     * case, mirroring COLLECT's entity case exactly), and repeatedly
-     * calls the same real MultiPlayerGameMode.attack used by
-     * tickCollectEntity until the target dies or the attempt is
-     * abandoned. Reports attack_result exactly once, either way.
+     * entity-lookup !find/!collect already use), then fights with
+     * whatever WeaponSelector.choose picks -- a real bow (kept at range,
+     * drawn/fired via BowShooter) if one is carried with arrows to shoot,
+     * otherwise the best melee weapon by attack damage (walked into
+     * ATTACK_MELEE_RANGE, same real MultiPlayerGameMode.attack
+     * tickCollectEntity already uses), otherwise bare hands. Reported
+     * live: !attack never selected any weapon at all, just fought with
+     * whatever happened to already be in hand. Reports attack_result
+     * exactly once, either way.
+     *
+     * Re-checks WeaponSelector every tick (cheap -- a plain inventory
+     * scan, same cost class as BlockBreaker.maybeSwitchToBestTool, which
+     * also re-checks every tick rather than once per target) rather than
+     * only once when a target is acquired: running out of arrows
+     * mid-fight should fall back to melee on the very next tick, not
+     * strand the attack holding an empty bow.
      *
      * Two ways to abandon an in-progress attack, per the explicit design
      * ask that this be more than "chase and melee until dead":
@@ -787,8 +797,15 @@ public final class MinebotMod implements ClientModInitializer {
      *   command forever.
      */
     private static final double ATTACK_MELEE_RANGE = 3.0;
+    // BowItem.DEFAULT_RANGE (confirmed via decompiled source) -- the
+    // real distance vanilla itself considers a bow's effective range.
+    // Kept at this distance rather than closing to melee range whenever
+    // a bow is the chosen weapon.
+    private static final double ATTACK_BOW_RANGE = 15.0;
     private static final float ATTACK_LOW_HEALTH_FRACTION = 0.25f;
     private static final int ATTACK_TARGET_TIMEOUT_TICKS = 200;
+
+    private final BowShooter bowShooter = new BowShooter();
 
     private void tickAttack(final LocalPlayer player, final ClientLevel level) {
         if (controlState.mode != ControlState.Mode.ATTACK) {
@@ -798,6 +815,7 @@ public final class MinebotMod implements ClientModInitializer {
         if (player.getHealth() <= player.getMaxHealth() * ATTACK_LOW_HEALTH_FRACTION) {
             LOGGER.warn("attack: own health too low ({}/{}), abandoning to self-preserve", player.getHealth(), player.getMaxHealth());
             String query = controlState.attackQuery;
+            bowShooter.stop();
             controlState.clear();
             broadcastAttackResultEvent(false, query, "had to retreat, health too low");
             return;
@@ -827,20 +845,39 @@ public final class MinebotMod implements ClientModInitializer {
             // -- still report success, same as tickCollectEntity: the
             // fight is over either way, just not from our own blow.
             String query = controlState.attackQuery;
+            bowShooter.stop();
             controlState.clear();
             broadcastAttackResultEvent(true, query, null);
             return;
+        }
+
+        WeaponSelector.Choice weapon = WeaponSelector.choose(player);
+        boolean useBow = weapon != null && weapon.kind() == WeaponSelector.Kind.BOW;
+        double engageRange = useBow ? ATTACK_BOW_RANGE : ATTACK_MELEE_RANGE;
+        // stopDistance drives resolveMovementIntent's ATTACK case (read
+        // there, not here) -- keeping it in sync with the currently
+        // chosen weapon's real range is what makes a bow user hold
+        // distance and shoot instead of walking all the way into melee
+        // range, and what makes running out of arrows immediately start
+        // closing the distance again rather than standing still at the
+        // old (now-wrong) bow range.
+        controlState.stopDistance = engageRange;
+
+        if (weapon != null && player.getInventory().getSelectedSlot() != weapon.slot()) {
+            InventoryActions.moveToHotbar(player, weapon.slot(), 8);
         }
 
         double dx = target.getX() - player.getX();
         double dy = target.getY() - player.getY();
         double dz = target.getZ() - player.getZ();
         double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (distance > ATTACK_MELEE_RANGE) {
-            // Still walking there -- resolveMovementIntent's ATTACK case
-            // is driving that. Only counts as "stuck" (not just "still
-            // approaching") once this stays true for a long while, same
-            // as COLLECT's own give-up timeout.
+        if (distance > engageRange) {
+            // Still walking there (or, for a bow, closing to bow range)
+            // -- resolveMovementIntent's ATTACK case is driving that.
+            // Only counts as "stuck" (not just "still approaching") once
+            // this stays true for a long while, same as COLLECT's own
+            // give-up timeout.
+            bowShooter.stop(); // not in range to shoot -- don't leave a draw held while walking
             if (++controlState.attackTargetStuckTicks > ATTACK_TARGET_TIMEOUT_TICKS) {
                 LOGGER.warn("attack: giving up, target unreachable after {} ticks", controlState.attackTargetStuckTicks);
                 String query = controlState.attackQuery;
@@ -851,10 +888,18 @@ public final class MinebotMod implements ClientModInitializer {
         }
 
         controlState.attackTargetStuckTicks = 0;
-        Minecraft.getInstance().gameMode.attack(player, target);
-        player.swing(InteractionHand.MAIN_HAND);
+
+        if (useBow) {
+            bowShooter.tick(player, target); // draws/fires on its own schedule; nothing more to do here this tick either way
+        } else {
+            bowShooter.stop(); // switched away from a bow (e.g. ran out of arrows) mid-draw -- don't leave keyUse stuck held
+            Minecraft.getInstance().gameMode.attack(player, target);
+            player.swing(InteractionHand.MAIN_HAND);
+        }
+
         if (target.isRemoved()) {
             String query = controlState.attackQuery;
+            bowShooter.stop();
             controlState.clear();
             broadcastAttackResultEvent(true, query, null);
         }

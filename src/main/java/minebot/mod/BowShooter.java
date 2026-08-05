@@ -1,0 +1,117 @@
+package minebot.mod;
+
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.item.BowItem;
+
+/**
+ * Draws and fires a real bow at a target, the same real-keybind-hold
+ * mechanism FoodEater/BlockBreaker already established for eating/mining
+ * (a direct API call to start/complete using an item does not reliably
+ * work -- see FoodEater's own docstring for the live investigation that
+ * found this -- so this holds the real `keyUse` keybind down instead of
+ * calling startUsingItem/releaseUsingItem directly, letting vanilla's
+ * own per-tick Minecraft.handleKeybinds() drive the actual draw/release
+ * exactly as it would for a human's held right-click).
+ *
+ * Aim direction is ported directly from AbstractSkeleton.performRangedAttack
+ * (confirmed via decompiled 26.1.2 source) rather than solving real
+ * projectile ballistics from scratch: vanilla's own ranged-mob AI doesn't
+ * compute a special arc pitch either -- it aims the raw vector to the
+ * target with a fixed, distance-proportional lift added to the
+ * direction's own Y component (more lift the farther away, compensating
+ * for the longer flight time gravity has to act over), not a solved
+ * launch angle. Reusing the same real, already-tuned formula the game's
+ * own ranged mobs use is both simpler and more trustworthy than
+ * re-deriving an equivalent one by hand.
+ */
+public final class BowShooter {
+    // AbstractSkeleton.performRangedAttack's own constant (decompiled:
+    // aimed direction's Y component is dy + horizontalDistance * 0.2).
+    private static final double ARC_LIFT_PER_BLOCK = 0.2;
+
+    // BowItem.MAX_DRAW_DURATION -- holding this long reaches
+    // getPowerForTime's max (1.0), a full-strength/full-accuracy shot,
+    // matching the explicit ask to always fully draw rather than firing
+    // faster, weaker partial-draw shots.
+    private static final int FULL_DRAW_TICKS = 20;
+
+    private boolean drawing;
+
+    /**
+     * Aims at `target`, holds the draw, and releases once fully drawn --
+     * call every tick a bow shot should be in progress. Returns true once
+     * a shot has actually been released this tick (caller can use this to
+     * decide when to allow movement/target reassignment again), false
+     * while still drawing.
+     */
+    public boolean tick(final LocalPlayer player, final Entity target) {
+        if (!(player.getMainHandItem().getItem() instanceof BowItem)) {
+            // Something else took over the main hand mid-draw (a tool
+            // switch elsewhere, !give, ...) -- abandon this shot cleanly
+            // rather than holding keyUse against whatever's now selected.
+            stop();
+            return false;
+        }
+
+        aimAt(player, target);
+
+        if (!drawing) {
+            drawing = true;
+            holdUseKey();
+            return false;
+        }
+
+        if (player.getTicksUsingItem() < FULL_DRAW_TICKS) {
+            return false;
+        }
+
+        releaseUseKey();
+        drawing = false;
+        return true;
+    }
+
+    /** Releases the draw key if a shot was left mid-draw -- e.g. the target died, was abandoned, or !stop/a new command superseded this attack. */
+    public void stop() {
+        if (drawing) {
+            releaseUseKey();
+            drawing = false;
+        }
+    }
+
+    public boolean isDrawing() {
+        return drawing;
+    }
+
+    private static void aimAt(final LocalPlayer player, final Entity target) {
+        double dx = target.getX() - player.getX();
+        double dz = target.getZ() - player.getZ();
+        double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
+        // Aim at roughly a third of the way up the target's body --
+        // Entity.getY(fraction) is the exact same real convenience
+        // AbstractSkeleton.performRangedAttack itself calls
+        // (target.getY(0.3333)) to get this height; eye level would be
+        // a real player's instinct, but this ports the exact real
+        // formula rather than substituting a different (if plausible-
+        // sounding) one.
+        double dy = (target.getY(1.0 / 3.0) - player.getEyeY()) + horizontalDistance * ARC_LIFT_PER_BLOCK;
+
+        float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        // Positive pitch = looking down (same convention already
+        // established in NearbyPlayerLookAt/BlockBreaker.aimAt, both
+        // confirmed via decompiled Entity.calculateViewVector).
+        float pitch = (float) -Math.toDegrees(Math.atan2(dy, horizontalDistance));
+        player.setYRot(yaw);
+        player.setXRot(pitch);
+    }
+
+    private static void holdUseKey() {
+        Minecraft.getInstance().options.keyUse.setDown(true);
+    }
+
+    private static void releaseUseKey() {
+        Minecraft.getInstance().options.keyUse.setDown(false);
+    }
+}
