@@ -181,7 +181,7 @@ public final class BlockBreaker {
         return currentTarget != null;
     }
 
-    /** The position currently being actively mined, or null if none (see hasActiveTarget) -- for debug rendering (see BlockTargetVisualizer). */
+    /** The position currently being actively mined, or null if none (see hasActiveTarget). */
     public BlockPos currentTarget() {
         return currentTarget;
     }

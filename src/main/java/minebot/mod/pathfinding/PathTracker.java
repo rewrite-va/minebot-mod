@@ -193,7 +193,7 @@ public final class PathTracker {
         stopDistanceComputedFor = Double.NaN;
     }
 
-    /** Read-only view of the currently planned path, in walk order -- for debug visualization (PathVisualizer). */
+    /** Read-only view of the currently planned path, in walk order. */
     public Collection<Move> waypoints() {
         return currentPath;
     }

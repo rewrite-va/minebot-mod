@@ -1,6 +1,7 @@
 package minebot.mod.statemachine.general;
 
 import minebot.mod.statemachine.Command;
+import minebot.mod.statemachine.Commands;
 import minebot.mod.statemachine.Edge;
 import minebot.mod.statemachine.StateMachine;
 import minebot.mod.statemachine.StateNode;
@@ -29,18 +30,9 @@ public final class GeneralStateMachine {
             GeneralState.FOLLOW, new GeneralFollowNode()
         );
         List<Edge<GeneralState>> edges = List.of(
-            new Edge<>(GeneralState.IDLE, GeneralState.FOLLOW, ctx -> hasCommand(ctx.commands, Command.Follow.class)),
-            new Edge<>(GeneralState.FOLLOW, GeneralState.IDLE, ctx -> hasCommand(ctx.commands, Command.Stop.class))
+            new Edge<>(GeneralState.IDLE, GeneralState.FOLLOW, ctx -> Commands.has(ctx.commands, Command.Follow.class)),
+            new Edge<>(GeneralState.FOLLOW, GeneralState.IDLE, ctx -> Commands.has(ctx.commands, Command.Stop.class))
         );
         return new StateMachine<>("general", GeneralState.IDLE, nodes, edges);
-    }
-
-    private static boolean hasCommand(final List<Command> commands, final Class<? extends Command> type) {
-        for (Command command : commands) {
-            if (type.isInstance(command)) {
-                return true;
-            }
-        }
-        return false;
     }
 }

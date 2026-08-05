@@ -6,20 +6,17 @@ import net.minecraft.world.entity.player.Player;
 
 /**
  * Looks at the closest nearby player's eye level -- a bot standing
- * genuinely idle (ControlState.Mode.IDLE, no goal at all) glances at
- * whoever's actually close by, the way a real player naturally would.
+ * genuinely idle glances at whoever's actually close by, the way a real
+ * player naturally would.
  *
- * Only applied while ControlState.mode is IDLE -- see MinebotMod.
- * onClientTick's call site. Originally gated on resolveMovementIntent
- * not having set a yaw this tick (i.e. not actively walking toward a
- * pathfinding waypoint), but that check alone wasn't sufficient: found
- * live that BlockBreaker.aimAt sets yaw/pitch directly on the player
- * (not through MovementIntent) while mining, so a nearby player would
- * still steal the look direction away from the block being mined the
- * instant they got close -- slowing mining down, since real destroy
- * progress only accumulates on ticks actually spent looking at (and
- * swinging at) the target. Gating on the mode itself instead of the
- * yaw-was-set signal covers every goal uniformly, mining included.
+ * Currently applied unconditionally every tick (see MinebotMod.
+ * onClientTick's call site) -- there's no other system contending for
+ * look direction right now (ControlState.Mode is IDLE-only post
+ * state-machine-architecture pivot, see STATE_MACHINE.md, and Head SM
+ * doesn't exist yet), so nothing to gate this against. Once Head SM
+ * exists, look-direction ownership/arbitration becomes its job, and this
+ * class should be ported into a Head node rather than called directly
+ * from onClientTick.
  */
 public final class NearbyPlayerLookAt {
     private static final double RANGE = 8.0;
