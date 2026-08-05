@@ -54,6 +54,7 @@ public final class BowShooter {
     private static final int FULL_DRAW_TICKS = 20;
 
     private boolean drawing;
+    private int ticksWaitingForUseItemConfirm;
 
     /**
      * Aims at `target`, starts (or continues) the draw, and releases
@@ -81,6 +82,7 @@ public final class BowShooter {
 
         if (!drawing) {
             drawing = true;
+            ticksWaitingForUseItemConfirm = 0;
             logDiagnostics(player, "starting draw");
         }
 
@@ -101,6 +103,10 @@ public final class BowShooter {
             // tick the key is still down); calling useItem() directly
             // has to re-earn the same resilience explicitly.
             Minecraft.getInstance().gameMode.useItem(player, InteractionHand.MAIN_HAND);
+            ticksWaitingForUseItemConfirm++;
+            if (ticksWaitingForUseItemConfirm % 5 == 0) {
+                logDiagnostics(player, "still waiting for isUsingItem to confirm, retried " + ticksWaitingForUseItemConfirm + " times");
+            }
             return false;
         }
 
