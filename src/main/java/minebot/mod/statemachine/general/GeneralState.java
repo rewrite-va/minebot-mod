@@ -15,18 +15,14 @@ package minebot.mod.statemachine.general;
  * actually swaps to food and eats, reacting to that published fact --
  * see GeneralSelfHealNode's own docstring for why General never reaches
  * into another axis's actual mechanics, the same rule FOLLOW already
- * follows for Legs/Head.
- *
- * RESUME is the generic "go back to whatever was interrupted" waypoint
- * (see ResumeNode's own docstring) -- SELF_HEAL transitions here once
- * its own isFinished() reports true (health recovered), and RESUME's own
- * edges (one per real destination state, see GeneralStateMachine) send
- * it on to whichever state was actually running before SELF_HEAL
- * interrupted it.
+ * follows for Legs/Head. Once healed, SELF_HEAL transitions straight
+ * back to whichever state it interrupted (tracked by the node itself,
+ * see GeneralSelfHealNode.stateToResume) -- no intermediate "resume"
+ * state; see GeneralSelfHealNode's own docstring for why a shared
+ * engine-level version of that was tried and reverted.
  */
 public enum GeneralState {
     IDLE,
     FOLLOW,
-    SELF_HEAL,
-    RESUME
+    SELF_HEAL
 }

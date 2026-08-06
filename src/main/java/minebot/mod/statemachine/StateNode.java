@@ -32,15 +32,26 @@ public interface StateNode<S extends Enum<S>> {
      * node itself tracks and exposes (not something the engine infers),
      * readable from any Edge condition to drive a normal transition out
      * of this state, the same way any other Edge condition works (e.g.
-     * `new Edge<>(SELF_HEAL, RESUME, ctx -> node.isFinished())`). Default
-     * false (never finished) for nodes that don't have a meaningful
-     * "done" concept at all (most IDLE-style nodes). A node that DOES
-     * have one (e.g. GeneralSelfHealNode once health recovers,
-     * LegsNavigateNode once it reaches its target, HandsEatNode once
-     * hunger is full) tracks its own boolean internally and returns it
-     * here -- deliberately not tied to any notion of "transient state" in
-     * the type system (no separate marker interface): any node can
-     * become finish-aware without changing what it extends/implements.
+     * `new Edge<>(SELF_HEAL, FOLLOW, ctx -> selfHealNode.isFinished() &&
+     * selfHealNode.stateToResume() == FOLLOW)` -- see
+     * GeneralSelfHealNode). Default false (never finished) for nodes that
+     * don't have a meaningful "done" concept at all (most IDLE-style
+     * nodes). A node that DOES have one (e.g. GeneralSelfHealNode once
+     * health recovers, HandsEatNode once hunger is full) tracks its own
+     * boolean internally and returns it here -- deliberately not tied to
+     * any notion of "transient state" in the type system (no separate
+     * marker interface): any node can become finish-aware without
+     * changing what it extends/implements.
+     *
+     * A node that needs to resume a specific PREVIOUS state once finished
+     * (rather than always transitioning to one fixed destination) tracks
+     * that separately itself, from its own onEnter's previousState
+     * parameter above (see GeneralSelfHealNode's own stateToResume field)
+     * -- there's no shared engine-level "resume" mechanism for this
+     * (deliberately -- see this file's own git history for why a generic
+     * version of this was tried and reverted: a multi-hop chain like
+     * FOLLOW -> SELF_HEAL -> some third state can't be correctly
+     * reconstructed from only "one step back" at the engine level).
      */
     default boolean isFinished() {
         return false;

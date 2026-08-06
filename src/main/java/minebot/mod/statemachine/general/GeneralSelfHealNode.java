@@ -15,13 +15,16 @@ import minebot.mod.statemachine.TickContext;
  * interaction (OPEN_DOOR's useItemOn call).
  *
  * isFinished() reports true once health has recovered above
- * LOW_HEALTH_FRACTION again -- GeneralStateMachine's own SELF_HEAL-
- * >RESUME edge reads this to leave, and RESUME's own edges (see
- * ResumeNode) send it back to whatever state was actually running before
- * SELF_HEAL interrupted it (e.g. resuming an interrupted !follow, which
- * Command.Follow's own one-shot nature -- fires once, the tick the chat
- * command arrives, see Command's own docstring -- can't otherwise
- * re-trigger on its own).
+ * LOW_HEALTH_FRACTION again. Remembers which state to resume (via
+ * onEnter's own previousState -- see StateNode's own docstring) itself,
+ * rather than relying on any shared engine-level "resume" mechanism --
+ * found live that a generic version of this (a shared ResumeNode reading
+ * a single engine-tracked "one step back" field) breaks the moment
+ * there's a real multi-hop chain: entering a THIRD state (the generic
+ * RESUME waypoint) after SELF_HEAL overwrote the engine's own memory
+ * with SELF_HEAL itself, losing the real answer (FOLLOW). Tracking it
+ * directly here, and transitioning straight to the real destination (no
+ * intermediate hop), sidesteps that whole class of bug.
  */
 public final class GeneralSelfHealNode implements StateNode<GeneralState> {
     // Matches FoodEater's old LOW_HEALTH_FRACTION default.
@@ -31,10 +34,18 @@ public final class GeneralSelfHealNode implements StateNode<GeneralState> {
     public static final BlackboardKey<Boolean> NEEDS_HEAL = new BlackboardKey<>();
 
     private boolean finished;
+    private GeneralState stateToResume = GeneralState.IDLE;
 
     @Override
     public void onEnter(final TickContext ctx, final GeneralState previousState) {
         finished = false;
+        // previousState is only null on the machine's very first-ever
+        // entry, which can never be SELF_HEAL itself (that's never the
+        // initial state) -- so this is always a real interrupted state
+        // in practice, but falls back to IDLE defensively rather than
+        // risk resuming into a null state some future change might
+        // introduce.
+        stateToResume = previousState != null ? previousState : GeneralState.IDLE;
     }
 
     @Override
@@ -51,6 +62,11 @@ public final class GeneralSelfHealNode implements StateNode<GeneralState> {
     @Override
     public boolean isFinished() {
         return finished;
+    }
+
+    /** Which state to transition straight back to once finished -- read by GeneralStateMachine's own SELF_HEAL exit edges (one per real destination state). */
+    public GeneralState stateToResume() {
+        return stateToResume;
     }
 
     /** How low health has to drop to enter this state in the first place -- GeneralStateMachine's own entry edges (from IDLE/FOLLOW) use this same threshold. */

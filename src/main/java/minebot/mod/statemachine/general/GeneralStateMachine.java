@@ -3,7 +3,6 @@ package minebot.mod.statemachine.general;
 import minebot.mod.statemachine.Command;
 import minebot.mod.statemachine.Commands;
 import minebot.mod.statemachine.Edge;
-import minebot.mod.statemachine.ResumeNode;
 import minebot.mod.statemachine.StateMachine;
 import minebot.mod.statemachine.StateNode;
 import minebot.mod.statemachine.TickContext;
@@ -23,12 +22,10 @@ import java.util.function.Predicate;
  * choice to keep new SM work from growing a second dependency on
  * ControlState's shape.
  *
- * SELF_HEAL/RESUME are General's first use of the "interrupt and resume"
- * pattern (see StateNode.isFinished/ResumeNode's own docstrings) --
- * RESUME's own edges are declared once here, one per real destination
- * state (IDLE/FOLLOW), not per transient state that might interrupt into
- * it (see the conversation that produced this pattern for why Edge.to
- * stays static rather than becoming dynamically computed).
+ * SELF_HEAL's own exit edges go straight to the real destination state
+ * (one per possible destination, each checking both isFinished() and
+ * stateToResume() -- see GeneralSelfHealNode's own docstring for why
+ * there's no intermediate "resume" waypoint).
  */
 public final class GeneralStateMachine {
     private GeneralStateMachine() {
@@ -36,13 +33,11 @@ public final class GeneralStateMachine {
 
     public static StateMachine<GeneralState> create() {
         GeneralSelfHealNode selfHealNode = new GeneralSelfHealNode();
-        ResumeNode<GeneralState> resumeNode = new ResumeNode<>();
 
         Map<GeneralState, StateNode<GeneralState>> nodes = Map.of(
             GeneralState.IDLE, new GeneralIdleNode(),
             GeneralState.FOLLOW, new GeneralFollowNode(),
-            GeneralState.SELF_HEAL, selfHealNode,
-            GeneralState.RESUME, resumeNode
+            GeneralState.SELF_HEAL, selfHealNode
         );
 
         Predicate<TickContext> lowHealth = ctx ->
@@ -53,13 +48,10 @@ public final class GeneralStateMachine {
             new Edge<>(GeneralState.FOLLOW, GeneralState.IDLE, ctx -> Commands.has(ctx.commands, Command.Stop.class)),
             new Edge<>(GeneralState.IDLE, GeneralState.SELF_HEAL, lowHealth),
             new Edge<>(GeneralState.FOLLOW, GeneralState.SELF_HEAL, lowHealth),
-            new Edge<>(GeneralState.SELF_HEAL, GeneralState.RESUME, ctx -> selfHealNode.isFinished()),
-            new Edge<>(GeneralState.RESUME, GeneralState.IDLE, ctx -> resumeNode.stateToResumeInto() == GeneralState.IDLE),
-            new Edge<>(GeneralState.RESUME, GeneralState.FOLLOW, ctx -> resumeNode.stateToResumeInto() == GeneralState.FOLLOW)
+            new Edge<>(GeneralState.SELF_HEAL, GeneralState.IDLE, ctx -> selfHealNode.isFinished() && selfHealNode.stateToResume() == GeneralState.IDLE),
+            new Edge<>(GeneralState.SELF_HEAL, GeneralState.FOLLOW, ctx -> selfHealNode.isFinished() && selfHealNode.stateToResume() == GeneralState.FOLLOW)
         );
 
-        StateMachine<GeneralState> machine = new StateMachine<>("general", GeneralState.IDLE, nodes, edges);
-        resumeNode.bindTo(machine);
-        return machine;
+        return new StateMachine<>("general", GeneralState.IDLE, nodes, edges);
     }
 }
