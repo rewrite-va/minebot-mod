@@ -199,33 +199,19 @@ public final class MinebotMod implements ClientModInitializer {
         generalStateMachine.tick(ctx);
         legsStateMachine.tick(ctx);
 
-        // Look direction is currently unowned by any SM (Head SM doesn't
-        // exist yet) -- NearbyPlayerLookAt is the only thing left setting
-        // yaw/pitch at all, unconditionally (there's no other mode to
-        // gate it against anymore now that ControlState.Mode is IDLE-only
-        // -- see git history for GOTO/FOLLOW/GIVE/DIG_DOWN/COLLECT/ATTACK's
-        // removal). This is a real, accepted interim gap: the bot won't
-        // look toward whatever Legs is walking toward until Head SM's
-        // first node exists.
-        MovementIntent intent = nearbyPlayerLookAt.resolve(player, level);
-        if (intent == null) {
-            intent = new MovementIntent();
-        }
-
-        if (intent.yaw != null) {
-            player.setYRot(intent.yaw);
-        }
-        if (intent.pitch != null) {
-            player.setXRot(intent.pitch);
-        }
-
-        respawnHandler.tick(player);
-        if (player.isDeadOrDying()) {
-            foodEater.releaseUseKeyIfHeld();
-            BlockBreaker.releaseAttackKeyIfHeld();
-        } else {
-            foodEater.maybeEat(player);
-        }
+        // TEMPORARY: NearbyPlayerLookAt/FoodEater/RespawnHandler all
+        // removed from the tick loop -- per explicit direction, to
+        // isolate live testing to ONLY what the state-machine
+        // architecture itself is driving (Legs SM's !follow/!stop right
+        // now), after NearbyPlayerLookAt's "looks at me when I get
+        // close" was reported live as visually confusing what Legs SM
+        // was actually doing. Restore incrementally, one at a time, once
+        // each has a real home in the new architecture (NearbyPlayerLookAt
+        // -> a future Head SM node; FoodEater -> a future Hands SM node;
+        // RespawnHandler -> arguably General SM's DEAD state) rather than
+        // left running unconditionally outside any SM the way they were
+        // before. See git history for the removed call sites if
+        // restoring one.
 
         maybeBroadcastPositionEvent(player);
         broadcastEntityEvents(player, level);
