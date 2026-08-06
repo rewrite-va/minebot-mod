@@ -5,20 +5,27 @@ import minebot.mod.pathfinding.Move;
 import minebot.mod.pathfinding.PathTracker;
 import minebot.mod.pathfinding.WaypointClassifier;
 import minebot.mod.statemachine.BlackboardKey;
-import minebot.mod.statemachine.Command;
 import minebot.mod.statemachine.StateNode;
 import minebot.mod.statemachine.TickContext;
-import net.minecraft.world.entity.Entity;
+import minebot.mod.statemachine.general.GeneralFollowNode;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * Walks toward a live entity's position -- the first real Legs behavior,
- * ported from MinebotMod.resolveMovementIntent's old FOLLOW case + its
- * shared pathfinding pipeline (see STATE_MACHINE.md's git history / the
- * conversation that produced this class for the full step-by-step
- * mapping). ControlState.Mode.FOLLOW/setFollow are gone -- this node,
- * driven by Command.Follow (see Command's own docstring), is now the
- * only thing that walks the bot toward a followed entity.
+ * Walks toward whatever position General:FOLLOW is currently publishing
+ * -- the first real Legs behavior, ported from MinebotMod.
+ * resolveMovementIntent's old FOLLOW case + its shared pathfinding
+ * pipeline (see STATE_MACHINE.md's git history / the conversation that
+ * produced this class for the full step-by-step mapping).
+ *
+ * No longer tracks followEntityId or does its own stop-distance check --
+ * General:FOLLOW owns both (see GeneralFollowNode's own docstring for
+ * why: it's the one thing that isn't idle while actively following, so
+ * it's the natural place to decide "should the rest of the bot be doing
+ * anything about this right now"). LegsStateMachine's own NAVIGATE<->IDLE
+ * edges already gate on General being in FOLLOW and not yet within
+ * range, so by the time this node's onTick runs, "should Legs be walking
+ * at all" is already answered -- this node only ever needs to answer
+ * "walk toward this specific position."
  *
  * Deliberately excludes, as real known gaps for future Hands SM nodes
  * (NOT ported here, unlike the rest of the old pipeline):
@@ -49,28 +56,15 @@ import net.minecraft.world.phys.Vec3;
  * decoupled from Head SM: real kiting (backing/strafing away from a
  * target while FACING it) needs exactly this -- Legs moving in an
  * arbitrary absolute direction while Head points the camera wherever it
- * wants, independent of travel direction. With HeadNavigateNode now
- * actively aiming at Legs' own published AIM_POINT (see below), the two
- * axes currently agree in practice (the bot both walks toward AND faces
- * its target while following) -- but they're independently computed and
- * independently owned, which is what will let a future Head node
- * override facing (e.g. aim at a combat target) while Legs keeps moving
- * in a real kite direction, without either axis needing to know about
- * the other's reasoning.
+ * wants, independent of travel direction.
  */
 public final class LegsNavigateNode implements StateNode {
-    private static final double STOP_DISTANCE = 2.0; // matches ControlState.setFollow's old default
-
     /** Legs' current aim point (the next waypoint, or the raw target if none) -- published every tick this node is active, read by Head SM's navigate node so it can face the same point Legs is walking toward, without a direct reference between the two SMs. Null when this node isn't active/has no target. */
     public static final BlackboardKey<Vec3> AIM_POINT = new BlackboardKey<>();
 
-    // Node-local state -- NOT ControlState fields. Which entity to follow
-    // comes from the most recent Command.Follow seen (see onTick below);
-    // pathTracker is this node's own instance, not shared with any other
-    // node/mode (unlike the old single ControlState.pathTracker every
-    // mode aliased).
+    // Node-local state, but no longer tracks WHICH entity to follow --
+    // just the current path toward whatever General:FOLLOW publishes.
     private final PathTracker pathTracker = new PathTracker();
-    private int followEntityId = -1;
 
     /** For PathVisualizer -- see MinebotMod's own wiring. Each node owns its own PathTracker now (unlike the old shared ControlState.pathTracker), so visualization needs a way to reach whichever one is currently active. */
     public PathTracker pathTracker() {
@@ -80,29 +74,12 @@ public final class LegsNavigateNode implements StateNode {
     @Override
     public void onEnter(final TickContext ctx) {
         pathTracker.reset();
-        for (Command command : ctx.commands) {
-            if (command instanceof Command.Follow follow) {
-                followEntityId = follow.entityId();
-            }
-        }
     }
 
     @Override
     public void onTick(final TickContext ctx) {
-        for (Command command : ctx.commands) {
-            if (command instanceof Command.Follow follow) {
-                // A fresh !follow for a different entity while already
-                // navigating -- re-aim at the new target, same as the old
-                // ControlState.setFollow's pathTracker.reset() did.
-                if (follow.entityId() != followEntityId) {
-                    pathTracker.reset();
-                }
-                followEntityId = follow.entityId();
-            }
-        }
-
-        Entity target = ctx.level.getEntity(followEntityId);
-        if (target == null) {
+        Vec3 targetPosition = ctx.blackboard.get(GeneralFollowNode.TARGET_POSITION);
+        if (targetPosition == null) {
             ctx.input.setIntent(new MovementIntent());
             ctx.blackboard.put(AIM_POINT, null);
             return;
@@ -111,11 +88,11 @@ public final class LegsNavigateNode implements StateNode {
         double selfX = ctx.player.getX();
         double selfY = ctx.player.getY();
         double selfZ = ctx.player.getZ();
-        double targetX = target.getX();
-        double targetY = target.getY();
-        double targetZ = target.getZ();
+        double targetX = targetPosition.x();
+        double targetY = targetPosition.y();
+        double targetZ = targetPosition.z();
 
-        pathTracker.maybeReplan(ctx.level, ctx.player, selfX, selfY, selfZ, targetX, targetY, targetZ, STOP_DISTANCE);
+        pathTracker.maybeReplan(ctx.level, ctx.player, selfX, selfY, selfZ, targetX, targetY, targetZ, GeneralFollowNode.stopDistance());
         Move waypoint = pathTracker.nextWaypoint(selfX, selfY, selfZ, ctx.player.onGround());
 
         // Aim at the next unreached waypoint's block center, or the raw
@@ -133,7 +110,7 @@ public final class LegsNavigateNode implements StateNode {
         // Only the raw target (not a waypoint) should stop the bot when
         // close enough -- a waypoint just short of the goal must still be
         // walked through, not treated as "arrived".
-        double distanceToStopAt = waypoint != null ? 0.0 : STOP_DISTANCE;
+        double distanceToStopAt = waypoint != null ? 0.0 : GeneralFollowNode.stopDistance();
 
         MovementIntent intent = new MovementIntent();
         boolean walking = horizontalDistance > distanceToStopAt;
@@ -158,7 +135,7 @@ public final class LegsNavigateNode implements StateNode {
         // MinebotMod's git log). Farmland check corrected from the old
         // pipeline's own version, per explicit direction: jumping itself
         // (e.g. over/from a farmland tile to reach some other block) is
-        // fine -- it's specifically LANDING on farmland that trampling
+        // fine -- it's specifically LANDING on farmland that tramples
         // real vanilla FarmBlock.fallOn mechanics, so this checks the
         // waypoint being jumped TO, not whichever block the bot currently
         // happens to be standing on.
@@ -176,7 +153,6 @@ public final class LegsNavigateNode implements StateNode {
     public void onExit(final TickContext ctx) {
         ctx.input.setIntent(new MovementIntent());
         ctx.blackboard.put(AIM_POINT, null);
-        followEntityId = -1;
     }
 
     /**

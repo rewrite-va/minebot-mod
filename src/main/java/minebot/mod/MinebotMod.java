@@ -95,7 +95,6 @@ public final class MinebotMod implements ClientModInitializer {
     private final InventoryReporter inventoryReporter = new InventoryReporter();
     private final ItemDropTracker itemDropTracker = new ItemDropTracker();
     private final RespawnHandler respawnHandler = new RespawnHandler(this::broadcastDeathEvent, this::broadcastRespawnEvent);
-    private final NearbyPlayerLookAt nearbyPlayerLookAt = new NearbyPlayerLookAt();
     // The peer-state-machine architecture described in STATE_MACHINE.md.
     // CommandBus is how a typed Command (see its own docstring) crosses
     // from dispatchMessage (WebSocket thread) to state machine edge
@@ -110,7 +109,7 @@ public final class MinebotMod implements ClientModInitializer {
     // class can also hold the reference for PathVisualizer -- see
     // LegsStateMachine.create's own docstring.
     private final LegsNavigateNode legsNavigateNode = new LegsNavigateNode();
-    private final StateMachine<LegsState> legsStateMachine = LegsStateMachine.create(legsNavigateNode);
+    private final StateMachine<LegsState> legsStateMachine = LegsStateMachine.create(legsNavigateNode, generalStateMachine);
     private final StateMachine<HeadState> headStateMachine = HeadStateMachine.create(legsStateMachine);
     private ControlClient controlClient;
     private float lastReportedHealth = -1;
@@ -216,10 +215,6 @@ public final class MinebotMod implements ClientModInitializer {
         // TEMPORARY: FoodEater/RespawnHandler still removed from the tick
         // loop -- per explicit direction, to isolate live testing to
         // ONLY what the state-machine architecture itself is driving.
-        // NearbyPlayerLookAt itself is retired now that Head SM owns look
-        // direction for real (HeadNavigateNode) -- restoring idle-look-
-        // at-nearby-player specifically means a future HeadState (e.g.
-        // IDLE_LOOK), not reviving the old standalone class as-is.
         // FoodEater -> a future Hands SM node; RespawnHandler -> arguably
         // General SM's DEAD state. See git history for the removed call
         // sites if restoring one.
