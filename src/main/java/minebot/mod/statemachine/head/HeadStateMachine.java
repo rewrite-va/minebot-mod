@@ -25,7 +25,7 @@ public final class HeadStateMachine {
     }
 
     public static StateMachine<HeadState> create(final StateMachine<LegsState> legsStateMachine) {
-        Map<HeadState, StateNode> nodes = Map.of(
+        Map<HeadState, StateNode<HeadState>> nodes = Map.of(
             HeadState.IDLE, new HeadIdleNode(),
             HeadState.NAVIGATE, new HeadNavigateNode()
         );

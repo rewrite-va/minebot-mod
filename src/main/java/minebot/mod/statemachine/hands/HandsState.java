@@ -15,11 +15,22 @@ package minebot.mod.statemachine.hands;
  * even though the bot happens to already be facing the door most of the
  * time as a side effect of Head:NAVIGATE aiming at the same waypoint.
  *
- * More states (eating, drawing a bow, mining, ...) get added later, per
- * STATE_MACHINE.md's "Implementation order" -- this is Hands' first real
- * node.
+ * EAT eats food while General:SELF_HEAL is active (its published
+ * NEEDS_HEAL fact) -- ported from the old standalone FoodEater class.
+ * Exits directly back to IDLE once finished (see HandsEatNode's own
+ * isFinished()), no interrupt/resume memory needed the way General's own
+ * SELF_HEAL/RESUME pair has: Hands' other states (e.g. a future combat
+ * node) each independently re-evaluate their own entry condition against
+ * General's CURRENT published state every tick, so the right Hands state
+ * naturally re-activates on its own the instant General moves on from
+ * SELF_HEAL back to whatever it actually resumes (e.g. COMBAT) -- Hands
+ * never needs to remember what it was doing before EAT interrupted it.
+ *
+ * More states (drawing a bow, mining, ...) get added later, per
+ * STATE_MACHINE.md's "Implementation order".
  */
 public enum HandsState {
     IDLE,
-    OPEN_DOOR
+    OPEN_DOOR,
+    EAT
 }

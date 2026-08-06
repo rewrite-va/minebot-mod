@@ -27,7 +27,7 @@ import net.minecraft.world.phys.Vec3;
  * STATE_MACHINE.md's arbiter design, reserved for genuinely exclusive,
  * multi-tick-held resources like keyUse/keyAttack).
  */
-public final class HandsOpenDoorNode implements StateNode {
+public final class HandsOpenDoorNode implements StateNode<HandsState> {
     // Matches DoorOpener's old INTERACT_RANGE -- roughly a real player's
     // short interaction reach.
     private static final double INTERACT_RANGE = 3.0;
@@ -39,7 +39,7 @@ public final class HandsOpenDoorNode implements StateNode {
     private int ticksSinceLastAttempt = RETRY_TICKS;
 
     @Override
-    public void onEnter(final TickContext ctx) {
+    public void onEnter(final TickContext ctx, final HandsState previousState) {
         ticksSinceLastAttempt = RETRY_TICKS; // always allowed to try immediately on entry
     }
 

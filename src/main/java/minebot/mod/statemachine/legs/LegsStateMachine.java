@@ -24,7 +24,7 @@ public final class LegsStateMachine {
 
     /** `navigateNode` is constructed by the caller (not internally) so it can also hold onto the reference directly -- e.g. MinebotMod wires PathVisualizer to navigateNode.pathTracker() for debug rendering. */
     public static StateMachine<LegsState> create(final LegsNavigateNode navigateNode, final StateMachine<GeneralState> generalStateMachine) {
-        Map<LegsState, StateNode> nodes = Map.of(
+        Map<LegsState, StateNode<LegsState>> nodes = Map.of(
             LegsState.IDLE, new LegsIdleNode(),
             LegsState.NAVIGATE, navigateNode
         );

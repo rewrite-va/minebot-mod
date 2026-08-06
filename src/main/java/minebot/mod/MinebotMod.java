@@ -93,7 +93,6 @@ public final class MinebotMod implements ClientModInitializer {
     // freshly-restarted Python backend to never learn any already-seen
     // player's name (see onControlChannelConnected's docstring).
     private final Set<Integer> knownPlayerIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
-    private final FoodEater foodEater = new FoodEater();
     private final InventoryReporter inventoryReporter = new InventoryReporter();
     private final ItemDropTracker itemDropTracker = new ItemDropTracker();
     private final RespawnHandler respawnHandler = new RespawnHandler(this::broadcastDeathEvent, this::broadcastRespawnEvent);
@@ -216,12 +215,13 @@ public final class MinebotMod implements ClientModInitializer {
         headStateMachine.tick(ctx);
         handsStateMachine.tick(ctx);
 
-        // TEMPORARY: FoodEater/RespawnHandler still removed from the tick
-        // loop -- per explicit direction, to isolate live testing to
-        // ONLY what the state-machine architecture itself is driving.
-        // FoodEater -> a future Hands SM node; RespawnHandler -> arguably
-        // General SM's DEAD state. See git history for the removed call
-        // sites if restoring one.
+        // TEMPORARY: RespawnHandler still removed from the tick loop --
+        // per explicit direction, to isolate live testing to ONLY what
+        // the state-machine architecture itself is driving. FoodEater's
+        // old always-on eating has a real replacement now
+        // (General:SELF_HEAL + Hands:EAT); RespawnHandler doesn't yet --
+        // arguably General SM's future DEAD state. See git history for
+        // the removed call site if restoring RespawnHandler.
 
         maybeBroadcastPositionEvent(player);
         broadcastEntityEvents(player, level);

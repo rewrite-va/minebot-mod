@@ -59,7 +59,7 @@ import net.minecraft.world.phys.Vec3;
  * arbitrary absolute direction while Head points the camera wherever it
  * wants, independent of travel direction.
  */
-public final class LegsNavigateNode implements StateNode {
+public final class LegsNavigateNode implements StateNode<LegsState> {
     /**
      * The next unreached waypoint's raw block position, or null when
      * there's no real planned waypoint (no path found/needed -- walking
@@ -88,7 +88,7 @@ public final class LegsNavigateNode implements StateNode {
     }
 
     @Override
-    public void onEnter(final TickContext ctx) {
+    public void onEnter(final TickContext ctx, final LegsState previousState) {
         pathTracker.reset();
     }
 

@@ -30,20 +30,29 @@ import java.util.Map;
 public final class StateMachine<S extends Enum<S>> {
     private final String name;
     private final S initialState;
-    private final Map<S, StateNode> nodes;
+    private final Map<S, StateNode<S>> nodes;
     private final Map<S, List<Edge<S>>> edgesByFromState;
 
     private S currentState;
+    // The state active immediately before currentState -- updated on
+    // EVERY transition (not just ones into specially-marked states), per
+    // explicit direction: this is what a ResumeNode reads to know where
+    // to go back to, always meaning "whatever was running right before
+    // this," correct by construction with no per-state marking needed.
+    // Same as currentState for the very first tick (nothing to resume
+    // into yet -- see stateBeforeCurrent()'s own docstring).
+    private S stateBeforeCurrent;
     private boolean started;
 
     /** `name` identifies this SM in log lines (e.g. "general", "legs") -- purely cosmetic, doesn't affect behavior. */
-    public StateMachine(final String name, final S initialState, final Map<S, StateNode> nodes, final List<Edge<S>> edges) {
+    public StateMachine(final String name, final S initialState, final Map<S, StateNode<S>> nodes, final List<Edge<S>> edges) {
         this.name = name;
         this.initialState = initialState;
         this.nodes = nodes;
         this.edgesByFromState = edges.stream()
             .collect(java.util.stream.Collectors.groupingBy(Edge::from, java.util.LinkedHashMap::new, java.util.stream.Collectors.toList()));
         this.currentState = initialState;
+        this.stateBeforeCurrent = initialState;
     }
 
     public String name() {
@@ -58,11 +67,16 @@ public final class StateMachine<S extends Enum<S>> {
         return currentState;
     }
 
+    /** Whatever state was active immediately before currentState -- see ResumeNode for the intended consumer. Equal to currentState itself until the first real transition ever happens (nothing to resume into yet). */
+    public S stateBeforeCurrent() {
+        return stateBeforeCurrent;
+    }
+
     /** Call once per tick. Publishes the resulting current state to `blackboard` itself -- callers don't need a separate publish step. */
     public void tick(final TickContext ctx) {
         if (!started) {
             started = true;
-            enter(currentState, ctx);
+            enter(null, currentState, ctx);
         }
 
         nodeFor(currentState).onTick(ctx);
@@ -70,8 +84,10 @@ public final class StateMachine<S extends Enum<S>> {
         for (Edge<S> edge : edgesByFromState.getOrDefault(currentState, List.of())) {
             if (edge.condition().test(ctx)) {
                 nodeFor(currentState).onExit(ctx);
+                S previousState = currentState;
                 currentState = edge.to();
-                enter(currentState, ctx);
+                stateBeforeCurrent = previousState;
+                enter(previousState, currentState, ctx);
                 break; // first matching edge wins, per STATE_MACHINE.md -- not evaluating the rest against the new state until next tick
             }
         }
@@ -79,14 +95,14 @@ public final class StateMachine<S extends Enum<S>> {
         ctx.blackboard.publish(this, currentState);
     }
 
-    /** The single place a state is ever entered -- logs, THEN calls the node's own onEnter, so the log line is genuinely part of "entering", not a separate step alongside it. */
-    private void enter(final S state, final TickContext ctx) {
+    /** The single place a state is ever entered -- logs, THEN calls the node's own onEnter, so the log line is genuinely part of "entering", not a separate step alongside it. `previousState` is null only for the machine's very first-ever entry (see StateNode.onEnter's own docstring). */
+    private void enter(final S previousState, final S state, final TickContext ctx) {
         MinebotMod.LOGGER.info("{}: entering {}", name, state);
-        nodeFor(state).onEnter(ctx);
+        nodeFor(state).onEnter(ctx, previousState);
     }
 
-    private StateNode nodeFor(final S state) {
-        StateNode node = nodes.get(state);
+    private StateNode<S> nodeFor(final S state) {
+        StateNode<S> node = nodes.get(state);
         if (node == null) {
             throw new IllegalStateException("no StateNode registered for " + state);
         }

@@ -22,7 +22,7 @@ import net.minecraft.world.phys.Vec3;
  * enough, instead of getting stuck in NAVIGATE forever once first
  * reached (the bug this was built to fix -- confirmed live).
  */
-public final class GeneralFollowNode implements StateNode {
+public final class GeneralFollowNode implements StateNode<GeneralState> {
     // Matches LegsNavigateNode's old STOP_DISTANCE default (itself
     // matching ControlState.setFollow's old default) -- moved here now
     // that General, not Legs, owns the "close enough" decision.
@@ -42,7 +42,7 @@ public final class GeneralFollowNode implements StateNode {
     }
 
     @Override
-    public void onEnter(final TickContext ctx) {
+    public void onEnter(final TickContext ctx, final GeneralState previousState) {
         for (Command command : ctx.commands) {
             if (command instanceof Command.Follow follow) {
                 followEntityId = follow.entityId();

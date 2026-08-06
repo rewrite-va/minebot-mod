@@ -8,15 +8,25 @@ package minebot.mod.statemachine.general;
  * FLEEING, FARMING, BUILDING, DEAD, ...) get added as real behaviors
  * that need them are ported in.
  *
- * FOLLOW is currently a label only -- GeneralFollowNode does nothing yet.
- * It exists to prove the Command/CommandBus pipeline end to end (a real
- * !follow chat command produces a Command.Follow, crosses from the
- * WebSocket thread to the tick thread, and drives a real transition
- * here) ahead of Legs SM actually doing anything with it later. The
- * bot's real FOLLOW movement behavior is still entirely driven by
- * ControlState/resolveMovementIntent, untouched by this.
+ * SELF_HEAL is reachable from any other state once health drops low
+ * enough (see GeneralSelfHealNode) -- General only ever PUBLISHES the
+ * "we need to heal" fact (NEEDS_HEAL on the Blackboard); it never
+ * touches inventory/keyUse itself. Hands:EAT (a separate SM) is what
+ * actually swaps to food and eats, reacting to that published fact --
+ * see GeneralSelfHealNode's own docstring for why General never reaches
+ * into another axis's actual mechanics, the same rule FOLLOW already
+ * follows for Legs/Head.
+ *
+ * RESUME is the generic "go back to whatever was interrupted" waypoint
+ * (see ResumeNode's own docstring) -- SELF_HEAL transitions here once
+ * its own isFinished() reports true (health recovered), and RESUME's own
+ * edges (one per real destination state, see GeneralStateMachine) send
+ * it on to whichever state was actually running before SELF_HEAL
+ * interrupted it.
  */
 public enum GeneralState {
     IDLE,
-    FOLLOW
+    FOLLOW,
+    SELF_HEAL,
+    RESUME
 }

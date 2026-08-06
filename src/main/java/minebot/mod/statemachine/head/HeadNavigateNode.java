@@ -35,7 +35,7 @@ import net.minecraft.world.phys.Vec3;
  * look target (aiming at a combat target, etc.), not tied to ordinary
  * navigation.
  */
-public final class HeadNavigateNode implements StateNode {
+public final class HeadNavigateNode implements StateNode<HeadState> {
     @Override
     public void onTick(final TickContext ctx) {
         BlockPos waypoint = ctx.blackboard.get(LegsNavigateNode.WAYPOINT_COORDINATES);

@@ -18,7 +18,7 @@ import net.minecraft.world.entity.player.Player;
  * deliberate look, not an artifact of walking, so tilting to actually
  * meet their eye level is the natural behavior here.
  */
-public final class HeadIdleNode implements StateNode {
+public final class HeadIdleNode implements StateNode<HeadState> {
     private static final double RANGE = 5.0;
     private static final double RANGE_SQUARED = RANGE * RANGE;
 
