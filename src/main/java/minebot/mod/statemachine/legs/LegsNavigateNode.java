@@ -160,8 +160,10 @@ public final class LegsNavigateNode implements StateNode {
 
     /**
      * Sets forward/backward/left/right on `intent` for `relativeYaw`
-     * degrees (0 = straight ahead, +90 = the player's own left per
-     * vanilla's yaw convention, -90 = right, +-180 = straight behind) --
+     * degrees (0 = straight ahead, +90 = the player's own right,
+     * -90 = left, +-180 = straight behind -- confirmed live, see
+     * setDirectionalKeys' own comment for why this isn't the sign one
+     * might expect from this codebase's usual facing-yaw convention) --
      * an 8-way (octant) approximation of a continuous direction, the same
      * granularity real discrete WASD keys are limited to (a real player
      * can't press "43% forward, 57% left" either, only combinations of
@@ -176,12 +178,15 @@ public final class LegsNavigateNode implements StateNode {
             intent.backward = true;
         }
         // Left/right: within 67.5 degrees of straight left/right.
-        // Vanilla convention (confirmed via decompiled Entity.
-        // calculateViewVector/KeyboardInput): positive yaw-delta is
-        // toward the player's own left.
-        if (relativeYaw > 22.5 && relativeYaw < 157.5) {
+        // Confirmed live (a first attempt using the opposite sign made
+        // the bot strafe right when the target was to its left) --
+        // positive relativeYaw is toward the player's own RIGHT, not
+        // left, despite the seemingly-analogous atan2(-dx, dz) facing
+        // convention used elsewhere in this codebase; movement's own
+        // left/right input axis evidently isn't mirrored the same way.
+        if (relativeYaw < -22.5 && relativeYaw > -157.5) {
             intent.left = true;
-        } else if (relativeYaw < -22.5 && relativeYaw > -157.5) {
+        } else if (relativeYaw > 22.5 && relativeYaw < 157.5) {
             intent.right = true;
         }
     }
