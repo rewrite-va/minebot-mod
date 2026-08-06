@@ -24,10 +24,11 @@ import net.minecraft.world.phys.Vec2;
  * own tick() output reach the player directly except when it's chosen as
  * the winner below.
  *
- * Yaw is set directly on the player by MinebotMod (see
- * resolveMovementIntent), not through this class -- Input only carries
- * forward/jump/sprint; look direction isn't part of vanilla's Input at
- * all (it's tracked on the Entity itself).
+ * Yaw is set directly on the player elsewhere (see STATE_MACHINE.md's
+ * Legs/Head axis split -- currently only LegsNavigateNode reads it,
+ * nothing writes it yet), not through this class -- Input carries
+ * forward/backward/left/right/jump/sprint; look direction isn't part of
+ * vanilla's Input at all (it's tracked on the Entity itself).
  */
 public final class MinebotInput extends ClientInput {
     private final KeyboardInput keyboard;
@@ -57,11 +58,25 @@ public final class MinebotInput extends ClientInput {
 
         MovementIntent current = intent;
         this.keyPresses = new Input(
-            current.forward, false, false, false, current.jump, false, current.sprint
+            current.forward, current.backward, current.left, current.right, current.jump, false, current.sprint
         );
-        // KeyboardInput's Vec2(left, forward) construction, mirrored exactly
-        // (see decompiled KeyboardInput.tick()) -- forward-only input here
-        // since minebot doesn't need strafing yet.
-        this.moveVector = new Vec2(0.0F, current.forward ? 1.0F : 0.0F);
+        // KeyboardInput.tick()'s own real Vec2(left, forward) construction,
+        // mirrored exactly (confirmed via decompiled bytecode):
+        // Vec2(calculateImpulse(left, right), calculateImpulse(forward,
+        // backward)).normalized() -- needed for real strafe/backward
+        // movement (LegsNavigateNode computes forward/backward/left/right
+        // relative to the player's current yaw, e.g. for kiting -- see
+        // STATE_MACHINE.md), not just forward-only.
+        this.moveVector = new Vec2(
+            calculateImpulse(current.left, current.right),
+            calculateImpulse(current.forward, current.backward)
+        ).normalized();
+    }
+
+    private static float calculateImpulse(final boolean positive, final boolean negative) {
+        if (positive == negative) {
+            return 0.0f;
+        }
+        return positive ? 1.0f : -1.0f;
     }
 }

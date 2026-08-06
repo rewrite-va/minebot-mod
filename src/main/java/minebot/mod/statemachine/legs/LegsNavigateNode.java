@@ -31,11 +31,28 @@ import net.minecraft.world.entity.Entity;
  * !follow simply cannot walk through a closed door or a blocked path --
  * an honest regression from the old behavior, not an oversight.
  *
- * Also deliberately excludes yaw/pitch entirely -- look direction is
- * Head SM's exclusive concern (see STATE_MACHINE.md's axis split). The
- * bot will walk toward its target without visually turning to face it
- * until Head SM's first node exists; an accepted, documented interim
- * gap, not a bug.
+ * Deliberately never WRITES yaw/pitch -- look direction is Head SM's
+ * exclusive concern (see STATE_MACHINE.md's axis split) -- but DOES
+ * READ the player's current yaw, to compute forward/backward/left/right
+ * relative to whatever direction the player currently happens to be
+ * facing (Minecraft's own movement model is inherently yaw-relative --
+ * "forward" always means "whichever way the entity is currently facing",
+ * confirmed live: an earlier version of this node only ever set
+ * `forward`, with nothing left to set yaw at all once it stopped doing
+ * so directly, and the bot walked in a fixed, arbitrary direction --
+ * whichever way it happened to be facing when !follow started --
+ * completely independent of the actual target's real position). Reading
+ * yaw without writing it is what actually keeps this decoupled from
+ * Head SM: real kiting (backing/strafing away from a target while
+ * FACING it) needs exactly this -- Legs moving in an arbitrary absolute
+ * direction while some other axis (eventually Head) points the camera
+ * wherever it wants, independent of travel direction. Until Head SM
+ * exists to deliberately set yaw (e.g. aiming at a combat target), the
+ * player's yaw is left at whatever it last was (nothing currently
+ * writes it at all), so the bot visibly strafes/walks backward toward
+ * its target rather than facing it -- an honest, visible interim state,
+ * but real, correct absolute-direction movement, unlike the walks-in-a-
+ * fixed-direction bug this replaces.
  */
 public final class LegsNavigateNode implements StateNode {
     private static final double STOP_DISTANCE = 2.0; // matches ControlState.setFollow's old default
@@ -107,7 +124,19 @@ public final class LegsNavigateNode implements StateNode {
         MovementIntent intent = new MovementIntent();
         boolean walking = horizontalDistance > distanceToStopAt;
         if (walking) {
-            intent.forward = true;
+            // World-space angle to the aim point (same atan2(-dx, dz)
+            // convention as the old pipeline/BowShooter/BlockBreaker,
+            // confirmed via decompiled Entity.calculateViewVector: yaw 0
+            // = south/+z), minus the player's CURRENT yaw (read, never
+            // written here -- see this class's own docstring) gives the
+            // direction to walk RELATIVE to whichever way the player
+            // happens to be facing right now. Necessary because
+            // Minecraft's movement is inherently yaw-relative -- there is
+            // no "walk toward absolute world direction X" primitive,
+            // only forward/backward/left/right relative to facing.
+            double targetYaw = Math.toDegrees(Math.atan2(-dx, dz));
+            double relativeYaw = normalizeDegrees(targetYaw - ctx.player.getYRot());
+            setDirectionalKeys(intent, relativeYaw);
         }
 
         // Same MAX_STEP_HEIGHT_TRIGGER/farmland-avoidance/always-sprint
@@ -127,5 +156,44 @@ public final class LegsNavigateNode implements StateNode {
     public void onExit(final TickContext ctx) {
         ctx.input.setIntent(new MovementIntent());
         followEntityId = -1;
+    }
+
+    /**
+     * Sets forward/backward/left/right on `intent` for `relativeYaw`
+     * degrees (0 = straight ahead, +90 = the player's own left per
+     * vanilla's yaw convention, -90 = right, +-180 = straight behind) --
+     * an 8-way (octant) approximation of a continuous direction, the same
+     * granularity real discrete WASD keys are limited to (a real player
+     * can't press "43% forward, 57% left" either, only combinations of
+     * whole keys). Combines two keys for a diagonal (e.g. forward+left)
+     * exactly like a real player would to walk at an angle.
+     */
+    private static void setDirectionalKeys(final MovementIntent intent, final double relativeYaw) {
+        // Forward/backward: within 67.5 degrees of straight ahead/behind.
+        if (relativeYaw > -67.5 && relativeYaw < 67.5) {
+            intent.forward = true;
+        } else if (relativeYaw > 112.5 || relativeYaw < -112.5) {
+            intent.backward = true;
+        }
+        // Left/right: within 67.5 degrees of straight left/right.
+        // Vanilla convention (confirmed via decompiled Entity.
+        // calculateViewVector/KeyboardInput): positive yaw-delta is
+        // toward the player's own left.
+        if (relativeYaw > 22.5 && relativeYaw < 157.5) {
+            intent.left = true;
+        } else if (relativeYaw < -22.5 && relativeYaw > -157.5) {
+            intent.right = true;
+        }
+    }
+
+    /** Wraps `degrees` into (-180, 180], the same range Entity.getYRot()/setYRot() themselves use. */
+    private static double normalizeDegrees(double degrees) {
+        degrees %= 360.0;
+        if (degrees <= -180.0) {
+            degrees += 360.0;
+        } else if (degrees > 180.0) {
+            degrees -= 360.0;
+        }
+        return degrees;
     }
 }

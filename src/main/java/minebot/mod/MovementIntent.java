@@ -15,6 +15,9 @@ package minebot.mod;
  */
 public final class MovementIntent {
     public boolean forward;
+    public boolean backward;
+    public boolean left;
+    public boolean right;
     public boolean jump;
     public boolean sprint;
     public Float yaw; // degrees, vanilla convention; null = don't change look direction
