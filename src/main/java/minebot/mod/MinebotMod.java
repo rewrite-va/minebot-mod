@@ -17,6 +17,8 @@ import minebot.mod.statemachine.StateMachine;
 import minebot.mod.statemachine.TickContext;
 import minebot.mod.statemachine.general.GeneralState;
 import minebot.mod.statemachine.general.GeneralStateMachine;
+import minebot.mod.statemachine.head.HeadState;
+import minebot.mod.statemachine.head.HeadStateMachine;
 import minebot.mod.statemachine.legs.LegsNavigateNode;
 import minebot.mod.statemachine.legs.LegsState;
 import minebot.mod.statemachine.legs.LegsStateMachine;
@@ -109,6 +111,7 @@ public final class MinebotMod implements ClientModInitializer {
     // LegsStateMachine.create's own docstring.
     private final LegsNavigateNode legsNavigateNode = new LegsNavigateNode();
     private final StateMachine<LegsState> legsStateMachine = LegsStateMachine.create(legsNavigateNode);
+    private final StateMachine<HeadState> headStateMachine = HeadStateMachine.create(legsStateMachine);
     private ControlClient controlClient;
     private float lastReportedHealth = -1;
 
@@ -116,7 +119,7 @@ public final class MinebotMod implements ClientModInitializer {
     public void onInitializeClient() {
         controlClient = new ControlClient("localhost", ControlClient.DEFAULT_PORT, this::handleMessage, this::onControlChannelConnected);
         controlClient.start();
-        new StatusHud(controlClient, List.of(generalStateMachine, legsStateMachine)).register();
+        new StatusHud(controlClient, List.of(generalStateMachine, legsStateMachine, headStateMachine)).register();
         new PathVisualizer(legsNavigateNode.pathTracker()).register();
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onClientTick);
@@ -199,25 +202,27 @@ public final class MinebotMod implements ClientModInitializer {
         // since the last tick (from dispatchMessage, a different thread
         // -- see CommandBus's own docstring) is visible to exactly one
         // tick's worth of edge conditions, never dropped/double-counted.
-        // Legs/Hands/Head still growing -- see STATE_MACHINE.md's
+        // Legs before Head so Head's edges (reading Legs' just-published
+        // LegsState) and HeadNavigateNode (reading Legs' AIM_POINT,
+        // written directly during Legs' own onTick, so it's actually
+        // fresh same-tick regardless of ordering) both see this tick's
+        // real data. Hands still to come -- see STATE_MACHINE.md's
         // "Implementation order".
         TickContext ctx = new TickContext(player, level, blackboard, commandBus.drain(), minebotInput);
         generalStateMachine.tick(ctx);
         legsStateMachine.tick(ctx);
+        headStateMachine.tick(ctx);
 
-        // TEMPORARY: NearbyPlayerLookAt/FoodEater/RespawnHandler all
-        // removed from the tick loop -- per explicit direction, to
-        // isolate live testing to ONLY what the state-machine
-        // architecture itself is driving (Legs SM's !follow/!stop right
-        // now), after NearbyPlayerLookAt's "looks at me when I get
-        // close" was reported live as visually confusing what Legs SM
-        // was actually doing. Restore incrementally, one at a time, once
-        // each has a real home in the new architecture (NearbyPlayerLookAt
-        // -> a future Head SM node; FoodEater -> a future Hands SM node;
-        // RespawnHandler -> arguably General SM's DEAD state) rather than
-        // left running unconditionally outside any SM the way they were
-        // before. See git history for the removed call sites if
-        // restoring one.
+        // TEMPORARY: FoodEater/RespawnHandler still removed from the tick
+        // loop -- per explicit direction, to isolate live testing to
+        // ONLY what the state-machine architecture itself is driving.
+        // NearbyPlayerLookAt itself is retired now that Head SM owns look
+        // direction for real (HeadNavigateNode) -- restoring idle-look-
+        // at-nearby-player specifically means a future HeadState (e.g.
+        // IDLE_LOOK), not reviving the old standalone class as-is.
+        // FoodEater -> a future Hands SM node; RespawnHandler -> arguably
+        // General SM's DEAD state. See git history for the removed call
+        // sites if restoring one.
 
         maybeBroadcastPositionEvent(player);
         broadcastEntityEvents(player, level);

@@ -3,10 +3,13 @@ package minebot.mod.statemachine.legs;
 import minebot.mod.MovementIntent;
 import minebot.mod.pathfinding.Move;
 import minebot.mod.pathfinding.PathTracker;
+import minebot.mod.pathfinding.WaypointClassifier;
+import minebot.mod.statemachine.BlackboardKey;
 import minebot.mod.statemachine.Command;
 import minebot.mod.statemachine.StateNode;
 import minebot.mod.statemachine.TickContext;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.phys.Vec3;
 
 /**
  * Walks toward a live entity's position -- the first real Legs behavior,
@@ -32,30 +35,34 @@ import net.minecraft.world.entity.Entity;
  * an honest regression from the old behavior, not an oversight.
  *
  * Deliberately never WRITES yaw/pitch -- look direction is Head SM's
- * exclusive concern (see STATE_MACHINE.md's axis split) -- but DOES
- * READ the player's current yaw, to compute forward/backward/left/right
- * relative to whatever direction the player currently happens to be
- * facing (Minecraft's own movement model is inherently yaw-relative --
- * "forward" always means "whichever way the entity is currently facing",
- * confirmed live: an earlier version of this node only ever set
- * `forward`, with nothing left to set yaw at all once it stopped doing
- * so directly, and the bot walked in a fixed, arbitrary direction --
- * whichever way it happened to be facing when !follow started --
- * completely independent of the actual target's real position). Reading
- * yaw without writing it is what actually keeps this decoupled from
- * Head SM: real kiting (backing/strafing away from a target while
- * FACING it) needs exactly this -- Legs moving in an arbitrary absolute
- * direction while some other axis (eventually Head) points the camera
- * wherever it wants, independent of travel direction. Until Head SM
- * exists to deliberately set yaw (e.g. aiming at a combat target), the
- * player's yaw is left at whatever it last was (nothing currently
- * writes it at all), so the bot visibly strafes/walks backward toward
- * its target rather than facing it -- an honest, visible interim state,
- * but real, correct absolute-direction movement, unlike the walks-in-a-
- * fixed-direction bug this replaces.
+ * exclusive concern (see STATE_MACHINE.md's axis split, and HeadState/
+ * HeadNavigateNode, which now actually owns it) -- but DOES READ the
+ * player's current yaw, to compute forward/backward/left/right relative
+ * to whatever direction the player currently happens to be facing
+ * (Minecraft's own movement model is inherently yaw-relative -- "forward"
+ * always means "whichever way the entity is currently facing", confirmed
+ * live: an earlier version of this node only ever set `forward` with
+ * nothing anywhere setting yaw at all, and the bot walked in a fixed,
+ * arbitrary direction -- whichever way it happened to be facing when
+ * !follow started -- completely independent of the actual target's real
+ * position). Reading yaw without writing it is what actually keeps this
+ * decoupled from Head SM: real kiting (backing/strafing away from a
+ * target while FACING it) needs exactly this -- Legs moving in an
+ * arbitrary absolute direction while Head points the camera wherever it
+ * wants, independent of travel direction. With HeadNavigateNode now
+ * actively aiming at Legs' own published AIM_POINT (see below), the two
+ * axes currently agree in practice (the bot both walks toward AND faces
+ * its target while following) -- but they're independently computed and
+ * independently owned, which is what will let a future Head node
+ * override facing (e.g. aim at a combat target) while Legs keeps moving
+ * in a real kite direction, without either axis needing to know about
+ * the other's reasoning.
  */
 public final class LegsNavigateNode implements StateNode {
     private static final double STOP_DISTANCE = 2.0; // matches ControlState.setFollow's old default
+
+    /** Legs' current aim point (the next waypoint, or the raw target if none) -- published every tick this node is active, read by Head SM's navigate node so it can face the same point Legs is walking toward, without a direct reference between the two SMs. Null when this node isn't active/has no target. */
+    public static final BlackboardKey<Vec3> AIM_POINT = new BlackboardKey<>();
 
     // Node-local state -- NOT ControlState fields. Which entity to follow
     // comes from the most recent Command.Follow seen (see onTick below);
@@ -97,6 +104,7 @@ public final class LegsNavigateNode implements StateNode {
         Entity target = ctx.level.getEntity(followEntityId);
         if (target == null) {
             ctx.input.setIntent(new MovementIntent());
+            ctx.blackboard.put(AIM_POINT, null);
             return;
         }
 
@@ -116,6 +124,7 @@ public final class LegsNavigateNode implements StateNode {
         double aimX = waypoint != null ? waypoint.x + 0.5 : targetX;
         double aimY = waypoint != null ? waypoint.y : targetY;
         double aimZ = waypoint != null ? waypoint.z + 0.5 : targetZ;
+        ctx.blackboard.put(AIM_POINT, new Vec3(aimX, aimY, aimZ));
 
         double dx = aimX - selfX;
         double dz = aimZ - selfZ;
@@ -144,12 +153,18 @@ public final class LegsNavigateNode implements StateNode {
             setDirectionalKeys(intent, relativeYaw);
         }
 
-        // Same MAX_STEP_HEIGHT_TRIGGER/farmland-avoidance/always-sprint
-        // reasoning as the old shared pipeline (see its own extensive
-        // comment history in MinebotMod's git log) -- ported unchanged.
-        boolean standingOnFarmland = ctx.level.getBlockState(ctx.player.blockPosition().below()).is(net.minecraft.world.level.block.Blocks.FARMLAND);
+        // Same MAX_STEP_HEIGHT_TRIGGER/always-sprint reasoning as the old
+        // shared pipeline (see its own extensive comment history in
+        // MinebotMod's git log). Farmland check corrected from the old
+        // pipeline's own version, per explicit direction: jumping itself
+        // (e.g. over/from a farmland tile to reach some other block) is
+        // fine -- it's specifically LANDING on farmland that trampling
+        // real vanilla FarmBlock.fallOn mechanics, so this checks the
+        // waypoint being jumped TO, not whichever block the bot currently
+        // happens to be standing on.
+        boolean landingOnFarmland = waypoint != null && WaypointClassifier.classify(ctx.level, waypoint.x, waypoint.y, waypoint.z).farmland();
         double dy = aimY - selfY;
-        if (walking && dy > 0.1 && !standingOnFarmland) {
+        if (walking && dy > 0.1 && !landingOnFarmland) {
             intent.jump = true;
             intent.sprint = true;
         }
@@ -160,6 +175,7 @@ public final class LegsNavigateNode implements StateNode {
     @Override
     public void onExit(final TickContext ctx) {
         ctx.input.setIntent(new MovementIntent());
+        ctx.blackboard.put(AIM_POINT, null);
         followEntityId = -1;
     }
 

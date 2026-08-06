@@ -22,6 +22,10 @@ import java.util.Map;
  */
 public final class Blackboard {
     private final Map<StateMachine<?>, Enum<?>> states = new HashMap<>();
+    // Arbitrary cross-SM data beyond just "current state" -- see
+    // BlackboardKey's own docstring for why this exists (e.g. Legs
+    // publishing its current waypoint aim point for Head to read).
+    private final Map<BlackboardKey<?>, Object> data = new HashMap<>();
 
     /** Called once per tick by each StateMachine after resolving its transitions for that tick. */
     <S extends Enum<S>> void publish(final StateMachine<S> machine, final S state) {
@@ -39,5 +43,16 @@ public final class Blackboard {
     public <S extends Enum<S>> S get(final StateMachine<S> machine) {
         Enum<?> value = states.get(machine);
         return value != null ? (S) value : machine.initialState();
+    }
+
+    /** Publishes arbitrary keyed data for other SMs to read -- call once per tick, same as state publishing. `value` may be null to explicitly clear/represent "nothing published this tick". */
+    public <T> void put(final BlackboardKey<T> key, final T value) {
+        data.put(key, value);
+    }
+
+    /** Reads keyed data published this tick (or the most recent tick it was published, per the same one-tick-lag reasoning as state publishing) -- null if never published, or explicitly published as null. */
+    @SuppressWarnings("unchecked")
+    public <T> T get(final BlackboardKey<T> key) {
+        return (T) data.get(key);
     }
 }
