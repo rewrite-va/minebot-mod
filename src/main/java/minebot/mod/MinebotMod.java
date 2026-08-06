@@ -17,6 +17,8 @@ import minebot.mod.statemachine.StateMachine;
 import minebot.mod.statemachine.TickContext;
 import minebot.mod.statemachine.general.GeneralState;
 import minebot.mod.statemachine.general.GeneralStateMachine;
+import minebot.mod.statemachine.hands.HandsState;
+import minebot.mod.statemachine.hands.HandsStateMachine;
 import minebot.mod.statemachine.head.HeadState;
 import minebot.mod.statemachine.head.HeadStateMachine;
 import minebot.mod.statemachine.legs.LegsNavigateNode;
@@ -111,6 +113,7 @@ public final class MinebotMod implements ClientModInitializer {
     private final LegsNavigateNode legsNavigateNode = new LegsNavigateNode();
     private final StateMachine<LegsState> legsStateMachine = LegsStateMachine.create(legsNavigateNode, generalStateMachine);
     private final StateMachine<HeadState> headStateMachine = HeadStateMachine.create(legsStateMachine);
+    private final StateMachine<HandsState> handsStateMachine = HandsStateMachine.create();
     private ControlClient controlClient;
     private float lastReportedHealth = -1;
 
@@ -118,7 +121,7 @@ public final class MinebotMod implements ClientModInitializer {
     public void onInitializeClient() {
         controlClient = new ControlClient("localhost", ControlClient.DEFAULT_PORT, this::handleMessage, this::onControlChannelConnected);
         controlClient.start();
-        new StatusHud(controlClient, List.of(generalStateMachine, legsStateMachine, headStateMachine)).register();
+        new StatusHud(controlClient, List.of(generalStateMachine, legsStateMachine, headStateMachine, handsStateMachine)).register();
         new PathVisualizer(legsNavigateNode.pathTracker()).register();
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onClientTick);
@@ -201,16 +204,17 @@ public final class MinebotMod implements ClientModInitializer {
         // since the last tick (from dispatchMessage, a different thread
         // -- see CommandBus's own docstring) is visible to exactly one
         // tick's worth of edge conditions, never dropped/double-counted.
-        // Legs before Head so Head's edges (reading Legs' just-published
-        // LegsState) and HeadNavigateNode (reading Legs' AIM_POINT,
-        // written directly during Legs' own onTick, so it's actually
-        // fresh same-tick regardless of ordering) both see this tick's
-        // real data. Hands still to come -- see STATE_MACHINE.md's
-        // "Implementation order".
+        // Legs before Head/Hands so both see Legs' just-published state
+        // this same tick (WAYPOINT_COORDINATES/etc. are written directly
+        // during Legs' own onTick, so they're fresh same-tick regardless
+        // of ordering; LegsState itself is only published at the end of
+        // legsStateMachine.tick(), so Head/Hands reading it here still
+        // see this tick's real value since they run after).
         TickContext ctx = new TickContext(player, level, blackboard, commandBus.drain(), minebotInput);
         generalStateMachine.tick(ctx);
         legsStateMachine.tick(ctx);
         headStateMachine.tick(ctx);
+        handsStateMachine.tick(ctx);
 
         // TEMPORARY: FoodEater/RespawnHandler still removed from the tick
         // loop -- per explicit direction, to isolate live testing to

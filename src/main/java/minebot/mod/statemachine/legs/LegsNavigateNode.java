@@ -8,6 +8,7 @@ import minebot.mod.statemachine.BlackboardKey;
 import minebot.mod.statemachine.StateNode;
 import minebot.mod.statemachine.TickContext;
 import minebot.mod.statemachine.general.GeneralFollowNode;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.phys.Vec3;
 
 /**
@@ -59,8 +60,23 @@ import net.minecraft.world.phys.Vec3;
  * wants, independent of travel direction.
  */
 public final class LegsNavigateNode implements StateNode {
-    /** Legs' current aim point (the next waypoint, or the raw target if none) -- published every tick this node is active, read by Head SM's navigate node so it can face the same point Legs is walking toward, without a direct reference between the two SMs. Null when this node isn't active/has no target. */
-    public static final BlackboardKey<Vec3> AIM_POINT = new BlackboardKey<>();
+    /**
+     * The next unreached waypoint's raw block position, or null when
+     * there's no real planned waypoint (no path found/needed -- walking
+     * straight at the raw target) or this node isn't active at all.
+     * Published every tick this node is active -- read by HeadNavigateNode
+     * (which derives its own fractional aim point from it) and
+     * HandsOpenDoorNode (which checks the actual block there for a closed
+     * door), without either needing a direct reference to this node (see
+     * STATE_MACHINE.md's "The blackboard"). Deliberately the raw integer
+     * block position, not a pre-offset Vec3 -- a fractional aim point is
+     * only meaningful to a consumer that wants to aim at it (Head); a
+     * consumer that wants to know what block this actually is (Hands)
+     * needs the real coordinates, not an already-offset point that could
+     * floor() back to the wrong block in edge cases (see the conversation
+     * that produced this field for the full reasoning).
+     */
+    public static final BlackboardKey<BlockPos> WAYPOINT_COORDINATES = new BlackboardKey<>();
 
     // Node-local state, but no longer tracks WHICH entity to follow --
     // just the current path toward whatever General:FOLLOW publishes.
@@ -81,7 +97,7 @@ public final class LegsNavigateNode implements StateNode {
         Vec3 targetPosition = ctx.blackboard.get(GeneralFollowNode.TARGET_POSITION);
         if (targetPosition == null) {
             ctx.input.setIntent(new MovementIntent());
-            ctx.blackboard.put(AIM_POINT, null);
+            ctx.blackboard.put(WAYPOINT_COORDINATES, null);
             return;
         }
 
@@ -94,6 +110,7 @@ public final class LegsNavigateNode implements StateNode {
 
         pathTracker.maybeReplan(ctx.level, ctx.player, selfX, selfY, selfZ, targetX, targetY, targetZ, GeneralFollowNode.stopDistance());
         Move waypoint = pathTracker.nextWaypoint(selfX, selfY, selfZ, ctx.player.onGround());
+        ctx.blackboard.put(WAYPOINT_COORDINATES, waypoint != null ? new BlockPos(waypoint.x, waypoint.y, waypoint.z) : null);
 
         // Aim at the next unreached waypoint's block center, or the raw
         // target if we have no plan (no path found / not yet computed) --
@@ -101,7 +118,6 @@ public final class LegsNavigateNode implements StateNode {
         double aimX = waypoint != null ? waypoint.x + 0.5 : targetX;
         double aimY = waypoint != null ? waypoint.y : targetY;
         double aimZ = waypoint != null ? waypoint.z + 0.5 : targetZ;
-        ctx.blackboard.put(AIM_POINT, new Vec3(aimX, aimY, aimZ));
 
         double dx = aimX - selfX;
         double dz = aimZ - selfZ;
@@ -152,7 +168,7 @@ public final class LegsNavigateNode implements StateNode {
     @Override
     public void onExit(final TickContext ctx) {
         ctx.input.setIntent(new MovementIntent());
-        ctx.blackboard.put(AIM_POINT, null);
+        ctx.blackboard.put(WAYPOINT_COORDINATES, null);
     }
 
     /**
