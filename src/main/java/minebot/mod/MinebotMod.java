@@ -17,6 +17,7 @@ import minebot.mod.statemachine.StateMachine;
 import minebot.mod.statemachine.TickContext;
 import minebot.mod.statemachine.general.GeneralState;
 import minebot.mod.statemachine.general.GeneralStateMachine;
+import minebot.mod.statemachine.legs.LegsNavigateNode;
 import minebot.mod.statemachine.legs.LegsState;
 import minebot.mod.statemachine.legs.LegsStateMachine;
 import net.minecraft.world.entity.Entity;
@@ -103,7 +104,11 @@ public final class MinebotMod implements ClientModInitializer {
     private final Blackboard blackboard = new Blackboard();
     private final CommandBus commandBus = new CommandBus();
     private final StateMachine<GeneralState> generalStateMachine = GeneralStateMachine.create();
-    private final StateMachine<LegsState> legsStateMachine = LegsStateMachine.create();
+    // Constructed directly (not inside LegsStateMachine.create()) so this
+    // class can also hold the reference for PathVisualizer -- see
+    // LegsStateMachine.create's own docstring.
+    private final LegsNavigateNode legsNavigateNode = new LegsNavigateNode();
+    private final StateMachine<LegsState> legsStateMachine = LegsStateMachine.create(legsNavigateNode);
     private ControlClient controlClient;
     private float lastReportedHealth = -1;
 
@@ -112,6 +117,7 @@ public final class MinebotMod implements ClientModInitializer {
         controlClient = new ControlClient("localhost", ControlClient.DEFAULT_PORT, this::handleMessage, this::onControlChannelConnected);
         controlClient.start();
         new StatusHud(controlClient, List.of(generalStateMachine, legsStateMachine)).register();
+        new PathVisualizer(legsNavigateNode.pathTracker()).register();
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onClientTick);
 

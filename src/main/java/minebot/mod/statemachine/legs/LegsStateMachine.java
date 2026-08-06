@@ -14,10 +14,11 @@ public final class LegsStateMachine {
     private LegsStateMachine() {
     }
 
-    public static StateMachine<LegsState> create() {
+    /** `navigateNode` is constructed by the caller (not internally) so it can also hold onto the reference directly -- e.g. MinebotMod wires PathVisualizer to navigateNode.pathTracker() for debug rendering. */
+    public static StateMachine<LegsState> create(final LegsNavigateNode navigateNode) {
         Map<LegsState, StateNode> nodes = Map.of(
             LegsState.IDLE, new LegsIdleNode(),
-            LegsState.NAVIGATE, new LegsNavigateNode()
+            LegsState.NAVIGATE, navigateNode
         );
         List<Edge<LegsState>> edges = List.of(
             new Edge<>(LegsState.IDLE, LegsState.NAVIGATE, ctx -> Commands.has(ctx.commands, Command.Follow.class)),

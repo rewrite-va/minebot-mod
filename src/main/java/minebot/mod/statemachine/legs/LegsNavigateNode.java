@@ -65,6 +65,11 @@ public final class LegsNavigateNode implements StateNode {
     private final PathTracker pathTracker = new PathTracker();
     private int followEntityId = -1;
 
+    /** For PathVisualizer -- see MinebotMod's own wiring. Each node owns its own PathTracker now (unlike the old shared ControlState.pathTracker), so visualization needs a way to reach whichever one is currently active. */
+    public PathTracker pathTracker() {
+        return pathTracker;
+    }
+
     @Override
     public void onEnter(final TickContext ctx) {
         pathTracker.reset();
