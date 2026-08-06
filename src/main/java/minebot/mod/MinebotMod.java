@@ -10,13 +10,15 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.KeyboardInput;
 import net.minecraft.client.player.LocalPlayer;
 import minebot.mod.pathfinding.BlockBreaker;
+import minebot.mod.pathfinding.PathTracker;
 import minebot.mod.statemachine.Blackboard;
 import minebot.mod.statemachine.Command;
 import minebot.mod.statemachine.CommandBus;
 import minebot.mod.statemachine.StateMachine;
 import minebot.mod.statemachine.TickContext;
-import minebot.mod.statemachine.general.GeneralState;
-import minebot.mod.statemachine.general.GeneralStateMachine;
+import minebot.mod.statemachine.playerintention.PlayerIntentionState;
+import minebot.mod.statemachine.playerintention.PlayerIntentionStateMachine;
+import minebot.mod.statemachine.playerintention.PlayerIntention;
 import minebot.mod.statemachine.hands.HandsState;
 import minebot.mod.statemachine.hands.HandsStateMachine;
 import minebot.mod.statemachine.head.HeadState;
@@ -95,24 +97,42 @@ public final class MinebotMod implements ClientModInitializer {
     private final Set<Integer> knownPlayerIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final InventoryReporter inventoryReporter = new InventoryReporter();
     private final ItemDropTracker itemDropTracker = new ItemDropTracker();
-    private final RespawnHandler respawnHandler = new RespawnHandler(this::broadcastDeathEvent, this::broadcastRespawnEvent);
+    private final AutoEquipArmor autoEquipArmor = new AutoEquipArmor();
     // The peer-state-machine architecture described in STATE_MACHINE.md.
     // CommandBus is how a typed Command (see its own docstring) crosses
     // from dispatchMessage (WebSocket thread) to state machine edge
-    // conditions (tick thread only) -- General and Legs are both built
+    // conditions (tick thread only) -- PlayerIntention and Legs are both built
     // against it, deliberately independent of ControlState's own
     // (largely retired) volatile-fields pattern. Hands/Head follow later,
     // per STATE_MACHINE.md's "Implementation order".
     private final Blackboard blackboard = new Blackboard();
     private final CommandBus commandBus = new CommandBus();
-    private final StateMachine<GeneralState> generalStateMachine = GeneralStateMachine.create();
+    // What the player actually asked for (IDLE/FOLLOW/DEFEND), constant
+    // across incidental interruptions like KILL and, notably, death/
+    // respawn (see DeathWatcher's own docstring for why death no longer
+    // touches this axis at all) -- see PlayerIntention's own docstring.
+    // Updated directly from dispatchMessage (WebSocket thread), read by
+    // PlayerIntentionStateMachine's own resume edges (tick thread).
+    private final PlayerIntention playerIntention = new PlayerIntention();
+    private final StateMachine<PlayerIntentionState> playerIntentionStateMachine = PlayerIntentionStateMachine.create(playerIntention);
+    // Ticked directly, not part of any peer StateMachine -- see its own
+    // docstring for why.
+    private final DeathWatcher deathWatcher = new DeathWatcher(this::broadcastDeathEvent, this::broadcastRespawnEvent);
+    // Shared by every Legs node that actually walks (LegsNavigateNode,
+    // LegsFleeNode's own delegation into it -- see TickContext's own
+    // docstring for why this lives there, reachable via ctx.pathTracker,
+    // rather than threaded through node constructors) -- constructed here
+    // so this class can also hold the reference for PathVisualizer, and
+    // passed into every TickContext built each tick (see its own build
+    // site below).
+    private final PathTracker legsPathTracker = new PathTracker();
     // Constructed directly (not inside LegsStateMachine.create()) so this
     // class can also hold the reference for PathVisualizer -- see
     // LegsStateMachine.create's own docstring.
     private final LegsNavigateNode legsNavigateNode = new LegsNavigateNode();
-    private final StateMachine<LegsState> legsStateMachine = LegsStateMachine.create(legsNavigateNode, generalStateMachine);
-    private final StateMachine<HeadState> headStateMachine = HeadStateMachine.create(legsStateMachine);
-    private final StateMachine<HandsState> handsStateMachine = HandsStateMachine.create();
+    private final StateMachine<LegsState> legsStateMachine = LegsStateMachine.create(legsNavigateNode, playerIntentionStateMachine);
+    private final StateMachine<HeadState> headStateMachine = HeadStateMachine.create(legsStateMachine, playerIntentionStateMachine);
+    private final StateMachine<HandsState> handsStateMachine = HandsStateMachine.create(playerIntentionStateMachine, legsStateMachine);
     private ControlClient controlClient;
     private float lastReportedHealth = -1;
 
@@ -120,8 +140,8 @@ public final class MinebotMod implements ClientModInitializer {
     public void onInitializeClient() {
         controlClient = new ControlClient("localhost", ControlClient.DEFAULT_PORT, this::handleMessage, this::onControlChannelConnected);
         controlClient.start();
-        new StatusHud(controlClient, List.of(generalStateMachine, legsStateMachine, headStateMachine, handsStateMachine)).register();
-        new PathVisualizer(legsNavigateNode.pathTracker()).register();
+        new StatusHud(controlClient, List.of(playerIntentionStateMachine, legsStateMachine, headStateMachine, handsStateMachine), blackboard).register();
+        new PathVisualizer(legsPathTracker).register();
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onClientTick);
 
@@ -209,19 +229,22 @@ public final class MinebotMod implements ClientModInitializer {
         // of ordering; LegsState itself is only published at the end of
         // legsStateMachine.tick(), so Head/Hands reading it here still
         // see this tick's real value since they run after).
-        TickContext ctx = new TickContext(player, level, blackboard, commandBus.drain(), minebotInput);
-        generalStateMachine.tick(ctx);
+        TickContext ctx = new TickContext(player, level, blackboard, commandBus.drain(), minebotInput, legsPathTracker);
+        // Before every peer SM -- LegsStateMachine's own GO_TO_DEATH_POSITION
+        // entry edge reads DEATH_POSITION this same tick, so a fresh death
+        // observed just now must already be visible by the time Legs
+        // evaluates its edges below (see DeathWatcher's own docstring).
+        deathWatcher.tick(ctx);
+        playerIntentionStateMachine.tick(ctx);
         legsStateMachine.tick(ctx);
         headStateMachine.tick(ctx);
         handsStateMachine.tick(ctx);
 
-        // TEMPORARY: RespawnHandler still removed from the tick loop --
-        // per explicit direction, to isolate live testing to ONLY what
-        // the state-machine architecture itself is driving. FoodEater's
-        // old always-on eating has a real replacement now
-        // (General:SELF_HEAL + Hands:EAT); RespawnHandler doesn't yet --
-        // arguably General SM's future DEAD state. See git history for
-        // the removed call site if restoring RespawnHandler.
+        // Always-on, independent of every StateMachine above -- see its
+        // own docstring for why this doesn't need a state of its own
+        // (a single-tick container click, no multi-tick behavior to
+        // coordinate with Legs/Head/PlayerIntention at all).
+        autoEquipArmor.tick(player);
 
         maybeBroadcastPositionEvent(player);
         broadcastEntityEvents(player, level);
@@ -264,9 +287,9 @@ public final class MinebotMod implements ClientModInitializer {
     }
 
     /**
-     * Deliberately stripped down to ONLY "follow"/"stop" -- see
-     * STATE_MACHINE.md and the conversation that produced this: every
-     * other command (goto/give/dig_down/collect/attack/chat/
+     * Deliberately stripped down to only "follow"/"stop"/"kill"/"defend"
+     * -- see STATE_MACHINE.md and the conversation that produced this:
+     * every other command (goto/give/dig_down/collect/chat/
      * move_to_hotbar/equip/drop/find/find_chest/query/debug_swap_test)
      * was removed along with the ControlState.Mode-driven machinery and
      * standalone classes that only existed to support them, rather than
@@ -274,14 +297,55 @@ public final class MinebotMod implements ClientModInitializer {
      * state-machine architecture. Each command gets reintroduced, one at
      * a time, once it's genuinely backed by a real SM node -- see git
      * history for the removed implementations if reintroducing one.
+     * "kill" was the first one reintroduced this way (PlayerIntention:KILL --
+     * originally named COMBAT, renamed once "defend" needed the exact
+     * same fighting mechanics with different re-entry semantics -- see
+     * CombatEngagement's own docstring); "defend" is PlayerIntention:DEFEND +
+     * the same Hands:MELEE_ATTACK/DRAW_BOW + Head:AIM_AT_TARGET.
+     *
+     * Also updates playerIntention here, alongside publishing the
+     * Command itself, for "follow"/"stop"/"defend" -- this is the one
+     * real place those messages arrive, so it's the natural place to
+     * record "what did the player actually ask for" too (see
+     * PlayerIntention's own docstring for why that's tracked separately
+     * from Command/CommandBus: Command is a one-tick signal an edge
+     * reacts to once, intention is a standing fact that survives across
+     * many ticks/interruptions). "kill" deliberately does NOT touch
+     * playerIntention -- it's a one-shot trigger, not a standing goal
+     * (see PlayerIntention/PlayerIntentionKillNode's own docstrings).
      */
     private void dispatchMessage(final String type, final JsonObject json) {
         switch (type) {
-            case "follow" -> commandBus.publish(new Command.Follow(
-                json.get("entity_id").getAsInt(),
-                json.has("stop_distance") ? json.get("stop_distance").getAsDouble() : 2.0
-            ));
-            case "stop" -> commandBus.publish(new Command.Stop());
+            case "follow" -> {
+                int entityId = json.get("entity_id").getAsInt();
+                double stopDistance = json.has("stop_distance") ? json.get("stop_distance").getAsDouble() : 2.0;
+                playerIntention.follow(entityId);
+                commandBus.publish(new Command.Follow(entityId, stopDistance));
+            }
+            case "stop" -> {
+                playerIntention.stop();
+                commandBus.publish(new Command.Stop());
+            }
+            case "kill" -> {
+                // "query" is optional -- absent/null means "nearest
+                // hostile mob" (see Command.Kill/PlayerIntentionKillNode's own
+                // docstrings). Deliberately does NOT touch
+                // playerIntention -- !kill is a one-shot trigger, not a
+                // standing goal (see PlayerIntention's own docstring for
+                // why KILL isn't a PlayerIntention value at all).
+                String query = json.has("query") && !json.get("query").isJsonNull() ? json.get("query").getAsString() : null;
+                commandBus.publish(new Command.Kill(query));
+            }
+            case "defend" -> {
+                // "entity_id" is optional -- absent/null means "defend
+                // the bot itself" (see Command.Defend/PlayerIntention's
+                // own docstrings). Same real Follow-style name->id
+                // resolution Python already does for !follow, when a
+                // real target is given.
+                Integer defendTargetEntityId = json.has("entity_id") && !json.get("entity_id").isJsonNull() ? json.get("entity_id").getAsInt() : null;
+                playerIntention.defend(defendTargetEntityId);
+                commandBus.publish(new Command.Defend(defendTargetEntityId));
+            }
             default -> LOGGER.warn("control channel: unknown command type '{}'", type);
         }
     }

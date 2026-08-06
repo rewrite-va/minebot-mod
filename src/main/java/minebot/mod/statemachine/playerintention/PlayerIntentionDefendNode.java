@@ -1,0 +1,138 @@
+package minebot.mod.statemachine.playerintention;
+
+import minebot.mod.EntityFinder;
+import minebot.mod.statemachine.StateNode;
+import minebot.mod.statemachine.TickContext;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.phys.Vec3;
+
+/**
+ * Standing protection mode -- auto-fights the nearest hostile to the
+ * defend target, and stays near the defend target (FOLLOW-style) between
+ * fights. Unlike PlayerIntentionKillNode, DEFEND never leaves itself to fight --
+ * it's a real PlayerIntention value (see its own docstring), so there's
+ * no "resume back to DEFEND once the fight ends" transition needed: this
+ * node just keeps publishing whichever of "follow the defend target" or
+ * "fight the current threat" applies each tick, entirely within DEFEND.
+ *
+ * The defend target itself comes from PlayerIntention (re-read every
+ * tick, same as PlayerIntentionFollowNode's own followEntityId) -- null
+ * (defendTargetEntityId()) means "defend the bot itself" (!defend with
+ * no argument), in which case the "anchor" position IS the player's own
+ * live position, and there's nothing to walk toward between fights (the
+ * bot doesn't need to follow itself) -- NAV_TARGET stays null/
+ * WITHIN_RANGE stays true in that case until a threat actually appears.
+ *
+ * Threat detection commits to a single target entity (via targetEntityId,
+ * same "keep walking toward THIS SAME entity" pattern LegsPickupItemsNode
+ * already established for its own item-target selection) but, UNLIKE
+ * LegsPickupItemsNode, re-evaluates every tick whether a NEW threat is
+ * meaningfully closer to the defend target and switches to it if so --
+ * confirmed live that never switching until the current target dies is
+ * wrong for defend specifically: a second hostile approaching the
+ * defended player from a different angle is a more urgent danger than
+ * whatever the bot happens to already be swinging at, and should
+ * preempt. Gated by RETARGET_MARGIN (not a bare "nearest != current"
+ * check every tick) to avoid the live-confirmed thrash risk two
+ * similar-distance threats would otherwise cause (flip-flopping the
+ * fight target every tick, discarding kiting progress each switch) --
+ * only a threat CLEARLY closer (by more than the margin) actually
+ * preempts; roughly-equidistant threats keep the current fight going
+ * uninterrupted.
+ */
+public final class PlayerIntentionDefendNode implements StateNode<PlayerIntentionState> {
+    private static final double THREAT_SEARCH_RADIUS = CombatEngagement.SEARCH_RADIUS;
+    // How much closer a new threat has to be than the current target
+    // (both measured from the defend target/anchor) to actually preempt
+    // it -- see this class's own docstring for why this exists at all.
+    private static final double RETARGET_MARGIN = 0.5;
+
+    private final PlayerIntention intention;
+
+    private int targetEntityId = -1;
+
+    public PlayerIntentionDefendNode(final PlayerIntention intention) {
+        this.intention = intention;
+    }
+
+    @Override
+    public void onEnter(final TickContext ctx, final PlayerIntentionState previousState) {
+        targetEntityId = -1;
+        onTick(ctx);
+    }
+
+    @Override
+    public void onTick(final TickContext ctx) {
+        Vec3 anchor = defendAnchor(ctx);
+        if (anchor == null) {
+            // The defend target itself is gone (a defended player left/
+            // disconnected) -- nothing to protect right now. Stay in
+            // DEFEND (only !stop leaves it -- see PlayerIntentionStateMachine's
+            // own edges); just nothing to do until PlayerIntention
+            // changes or the target reappears.
+            CombatEngagement.clear(ctx);
+            return;
+        }
+
+        Entity currentThreat = currentTarget(ctx);
+        Entity nearestThreat = EntityFinder.findNearestHostile(ctx.level, anchor, THREAT_SEARCH_RADIUS);
+
+        if (currentThreat == null) {
+            currentThreat = nearestThreat;
+            targetEntityId = currentThreat != null ? currentThreat.getId() : -1;
+        } else if (nearestThreat != null && nearestThreat != currentThreat) {
+            // Only preempt if nearestThreat is CLEARLY closer to the
+            // defend target than the one already being fought -- see
+            // this class's own docstring for why (avoids thrashing
+            // between two roughly-equidistant threats).
+            double currentDistance = currentThreat.position().distanceTo(anchor);
+            double nearestDistance = nearestThreat.position().distanceTo(anchor);
+            if (nearestDistance + RETARGET_MARGIN < currentDistance) {
+                currentThreat = nearestThreat;
+                targetEntityId = currentThreat.getId();
+            }
+        }
+
+        if (currentThreat != null) {
+            CombatEngagement.publish(ctx, currentThreat);
+            return;
+        }
+
+        // No threat right now -- stay near the defend target (self-defend
+        // has nothing to walk toward, see this class's own docstring).
+        Integer defendTargetEntityId = intention.current().defendTargetEntityId();
+        if (defendTargetEntityId == null) {
+            CombatEngagement.clear(ctx);
+            return;
+        }
+        ctx.blackboard.put(NavIntent.NAV_TARGET, new NavIntent.Target(anchor, NavIntent.defaultStopDistance()));
+        double distance = ctx.player.position().distanceTo(anchor);
+        ctx.blackboard.put(NavIntent.NAV_ARRIVED, distance <= NavIntent.defaultStopDistance());
+        ctx.blackboard.put(CombatEngagement.TARGET_ENTITY_ID, null);
+        ctx.blackboard.put(CombatEngagement.SELECTED_WEAPON, null);
+    }
+
+    @Override
+    public void onExit(final TickContext ctx) {
+        CombatEngagement.clear(ctx);
+        targetEntityId = -1;
+    }
+
+    /** The live position to defend AND to stay near between fights -- the bot's own position for self-defend (defendTargetEntityId() == null), or the defend target's live position otherwise. Null if a real defend target was specified but is no longer resolvable (disconnected/despawned). */
+    private Vec3 defendAnchor(final TickContext ctx) {
+        Integer defendTargetEntityId = intention.current().defendTargetEntityId();
+        if (defendTargetEntityId == null) {
+            return ctx.player.position();
+        }
+        Entity target = ctx.level.getEntity(defendTargetEntityId);
+        return target != null ? target.position() : null;
+    }
+
+    private Entity currentTarget(final TickContext ctx) {
+        if (targetEntityId == -1) {
+            return null;
+        }
+        Entity entity = ctx.level.getEntity(targetEntityId);
+        return entity != null && !entity.isRemoved() ? entity : null;
+    }
+}

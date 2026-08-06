@@ -2,7 +2,7 @@ package minebot.mod.statemachine.head;
 
 import minebot.mod.statemachine.StateNode;
 import minebot.mod.statemachine.TickContext;
-import minebot.mod.statemachine.general.GeneralFollowNode;
+import minebot.mod.statemachine.playerintention.NavIntent;
 import minebot.mod.statemachine.legs.LegsNavigateNode;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.phys.Vec3;
@@ -18,11 +18,11 @@ import net.minecraft.world.phys.Vec3;
  * published value is deliberately the raw block position, not a
  * pre-offset point -- see WAYPOINT_COORDINATES' own docstring).
  *
- * Falls back to GeneralFollowNode.TARGET_POSITION (the raw followed-
- * entity position) whenever there's no real waypoint to face -- e.g. no
- * path found, or close enough that the planned path is exhausted --
- * matching the old shared pipeline's own fallback shape (aim at the
- * waypoint if there is one, otherwise the raw target).
+ * Falls back to NavIntent.NAV_TARGET (the raw target whichever
+ * PlayerIntention node is currently active published) whenever there's no real waypoint
+ * to face -- e.g. no path found, or close enough that the planned path
+ * is exhausted -- matching the old shared pipeline's own fallback shape
+ * (aim at the waypoint if there is one, otherwise the raw target).
  *
  * Pitch is pinned level (0 -- looking straight at the horizon), not
  * aimed at the waypoint's exact height -- confirmed live: pitching to
@@ -43,7 +43,8 @@ public final class HeadNavigateNode implements StateNode<HeadState> {
         if (waypoint != null) {
             aimPoint = new Vec3(waypoint.getX() + 0.5, waypoint.getY(), waypoint.getZ() + 0.5);
         } else {
-            aimPoint = ctx.blackboard.get(GeneralFollowNode.TARGET_POSITION);
+            NavIntent.Target target = ctx.blackboard.get(NavIntent.NAV_TARGET);
+            aimPoint = target != null ? target.position() : null;
         }
         if (aimPoint == null) {
             return; // nothing real to face right now -- leave yaw as it is

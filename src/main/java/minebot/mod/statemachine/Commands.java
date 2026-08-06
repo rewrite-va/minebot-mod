@@ -2,7 +2,7 @@ package minebot.mod.statemachine;
 
 import java.util.List;
 
-/** Small shared helper for Edge conditions that just need to know "did a Command of this type arrive this tick" -- used identically by General/Legs's own edge tables. */
+/** Small shared helper for Edge conditions that just need to know "did a Command of this type arrive this tick" -- used identically by PlayerIntention/Legs's own edge tables. */
 public final class Commands {
     private Commands() {
     }

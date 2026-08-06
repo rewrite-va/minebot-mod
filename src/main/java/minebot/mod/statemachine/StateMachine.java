@@ -7,7 +7,7 @@ import java.util.Map;
 
 /**
  * One independent, peer axis of the bot's behavior (Legs/Hands/Head/
- * General, ...) -- see STATE_MACHINE.md for the full design this
+ * PlayerIntention, ...) -- see STATE_MACHINE.md for the full design this
  * implements. Ticks its current node, evaluates that node's outgoing
  * edges in declaration order, takes the first whose condition is true
  * (calling onExit/onEnter as the transition happens), then publishes its

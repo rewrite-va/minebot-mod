@@ -2,31 +2,33 @@ package minebot.mod.statemachine.legs;
 
 import minebot.mod.MovementIntent;
 import minebot.mod.pathfinding.Move;
-import minebot.mod.pathfinding.PathTracker;
 import minebot.mod.pathfinding.WaypointClassifier;
 import minebot.mod.statemachine.BlackboardKey;
 import minebot.mod.statemachine.StateNode;
 import minebot.mod.statemachine.TickContext;
-import minebot.mod.statemachine.general.GeneralFollowNode;
+import minebot.mod.statemachine.playerintention.NavIntent;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * Walks toward whatever position General:FOLLOW is currently publishing
- * -- the first real Legs behavior, ported from MinebotMod.
- * resolveMovementIntent's old FOLLOW case + its shared pathfinding
- * pipeline (see STATE_MACHINE.md's git history / the conversation that
- * produced this class for the full step-by-step mapping).
+ * Walks toward whatever position PlayerIntention is currently publishing via
+ * NavIntent.NAV_TARGET -- the first real Legs behavior, ported from
+ * MinebotMod.resolveMovementIntent's old FOLLOW case + its shared
+ * pathfinding pipeline (see STATE_MACHINE.md's git history / the
+ * conversation that produced this class for the full step-by-step
+ * mapping).
  *
  * No longer tracks followEntityId or does its own stop-distance check --
- * General:FOLLOW owns both (see GeneralFollowNode's own docstring for
- * why: it's the one thing that isn't idle while actively following, so
- * it's the natural place to decide "should the rest of the bot be doing
- * anything about this right now"). LegsStateMachine's own NAVIGATE<->IDLE
- * edges already gate on General being in FOLLOW and not yet within
- * range, so by the time this node's onTick runs, "should Legs be walking
- * at all" is already answered -- this node only ever needs to answer
- * "walk toward this specific position."
+ * whichever PlayerIntention node is currently active owns both (see NavIntent's
+ * own docstring for why this is a shared channel, not FOLLOW-specific
+ * anymore: GO_TO_DEATH_POSITION/PICKUP_ITEMS need the exact same "walk
+ * toward this point, stop when close enough" shape for their own
+ * targets). LegsStateMachine's own NAVIGATE<->IDLE edges already gate on
+ * a NAV_TARGET existing and not yet being within range, so by the time
+ * this node's onTick runs, "should Legs be walking at all" is already
+ * answered -- this node only ever needs to answer "walk toward this
+ * specific position," with zero awareness of WHY (which PlayerIntention state
+ * asked, or what it's for).
  *
  * Deliberately excludes, as real known gaps for future Hands SM nodes
  * (NOT ported here, unlike the rest of the old pipeline):
@@ -58,6 +60,18 @@ import net.minecraft.world.phys.Vec3;
  * target while FACING it) needs exactly this -- Legs moving in an
  * arbitrary absolute direction while Head points the camera wherever it
  * wants, independent of travel direction.
+ *
+ * Uses ctx.pathTracker -- a single PathTracker shared across every Legs
+ * node that walks (this one, and LegsFleeNode via its own delegation into
+ * walkTowardNavTarget below), living on TickContext itself (see its own
+ * docstring) rather than owned privately per-node or threaded through
+ * node constructors -- per explicit direction, nodes reach shared engine
+ * state the same way they already reach everything else per-tick
+ * (ctx.blackboard, ctx.input, ...), not via ad hoc references passed
+ * around outside that channel. NAVIGATE/FLEE are never active at the same
+ * time (see LegsStateMachine's own edges), and PathVisualizer draws
+ * whichever plan is current regardless of which state produced it, so one
+ * shared instance is exactly right here.
  */
 public final class LegsNavigateNode implements StateNode<LegsState> {
     /**
@@ -76,30 +90,45 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
      * floor() back to the wrong block in edge cases (see the conversation
      * that produced this field for the full reasoning).
      */
-    public static final BlackboardKey<BlockPos> WAYPOINT_COORDINATES = new BlackboardKey<>();
-
-    // Node-local state, but no longer tracks WHICH entity to follow --
-    // just the current path toward whatever General:FOLLOW publishes.
-    private final PathTracker pathTracker = new PathTracker();
-
-    /** For PathVisualizer -- see MinebotMod's own wiring. Each node owns its own PathTracker now (unlike the old shared ControlState.pathTracker), so visualization needs a way to reach whichever one is currently active. */
-    public PathTracker pathTracker() {
-        return pathTracker;
-    }
+    public static final BlackboardKey<BlockPos> WAYPOINT_COORDINATES = new BlackboardKey<>("WAYPOINT_COORDINATES");
 
     @Override
     public void onEnter(final TickContext ctx, final LegsState previousState) {
-        pathTracker.reset();
+        ctx.pathTracker.reset();
     }
 
     @Override
     public void onTick(final TickContext ctx) {
-        Vec3 targetPosition = ctx.blackboard.get(GeneralFollowNode.TARGET_POSITION);
-        if (targetPosition == null) {
+        walkTowardNavTarget(ctx);
+    }
+
+    @Override
+    public void onExit(final TickContext ctx) {
+        ctx.input.setIntent(new MovementIntent());
+        ctx.blackboard.put(WAYPOINT_COORDINATES, null);
+    }
+
+    /**
+     * The actual "walk toward whatever NavIntent.NAV_TARGET currently
+     * says, using ctx.pathTracker's own plan" logic -- shared by this
+     * node's own onTick and by LegsFleeNode's (see its own docstring for
+     * why FLEE delegates its actual movement here after publishing its
+     * own computed retreat point as NAV_TARGET, rather than duplicating
+     * this walk logic or driving movement itself): both ultimately reduce
+     * to the same "walk toward whatever position NAV_TARGET holds right
+     * now" problem, and NAVIGATE/FLEE are never active at the same time
+     * (see LegsStateMachine's own edges), so there's no real reason for
+     * two separate implementations of it.
+     */
+    static void walkTowardNavTarget(final TickContext ctx) {
+        NavIntent.Target target = ctx.blackboard.get(NavIntent.NAV_TARGET);
+        if (target == null) {
             ctx.input.setIntent(new MovementIntent());
             ctx.blackboard.put(WAYPOINT_COORDINATES, null);
             return;
         }
+        Vec3 targetPosition = target.position();
+        double stopDistanceValue = target.stopDistance();
 
         double selfX = ctx.player.getX();
         double selfY = ctx.player.getY();
@@ -108,8 +137,8 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         double targetY = targetPosition.y();
         double targetZ = targetPosition.z();
 
-        pathTracker.maybeReplan(ctx.level, ctx.player, selfX, selfY, selfZ, targetX, targetY, targetZ, GeneralFollowNode.stopDistance());
-        Move waypoint = pathTracker.nextWaypoint(selfX, selfY, selfZ, ctx.player.onGround());
+        ctx.pathTracker.maybeReplan(ctx.level, ctx.player, selfX, selfY, selfZ, targetX, targetY, targetZ, stopDistanceValue);
+        Move waypoint = ctx.pathTracker.nextWaypoint(selfX, selfY, selfZ, ctx.player.onGround());
         ctx.blackboard.put(WAYPOINT_COORDINATES, waypoint != null ? new BlockPos(waypoint.x, waypoint.y, waypoint.z) : null);
 
         // Aim at the next unreached waypoint's block center, or the raw
@@ -126,7 +155,7 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         // Only the raw target (not a waypoint) should stop the bot when
         // close enough -- a waypoint just short of the goal must still be
         // walked through, not treated as "arrived".
-        double distanceToStopAt = waypoint != null ? 0.0 : GeneralFollowNode.stopDistance();
+        double distanceToStopAt = waypoint != null ? 0.0 : stopDistanceValue;
 
         MovementIntent intent = new MovementIntent();
         boolean walking = horizontalDistance > distanceToStopAt;
@@ -163,12 +192,6 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         }
 
         ctx.input.setIntent(intent);
-    }
-
-    @Override
-    public void onExit(final TickContext ctx) {
-        ctx.input.setIntent(new MovementIntent());
-        ctx.blackboard.put(WAYPOINT_COORDINATES, null);
     }
 
     /**
