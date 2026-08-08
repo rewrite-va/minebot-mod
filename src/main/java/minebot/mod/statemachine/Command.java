@@ -31,4 +31,12 @@ public sealed interface Command {
     /** !defend [player] -- standing protection mode: auto-fights the nearest hostile to `defendTargetEntityId`, staying near that entity between fights (same real Follow-style name->id resolution Python already does for !follow -- see MovementController's own docstring). `defendTargetEntityId` null means "defend the bot itself" (no argument given). */
     record Defend(Integer defendTargetEntityId) implements Command {
     }
+
+    /** !pickup -- walk to and grab every dropped item within LegsPickupItemsNode's own RADIUS of wherever the bot is standing the instant this command arrives (see its own docstring). Deliberately carries no data (same shape as Stop) -- the anchor position is resolved from the LIVE player position on the tick thread once LegsStateMachine's own edge sees this, not from anything captured here on the WebSocket thread. */
+    record Pickup() implements Command {
+    }
+
+    /** !give [recipient] [item] [quantity] -- read by TaskController.tick() (not any peer StateMachine) to enqueue a fresh GiveTask, the same cross-thread handoff shape every other Command uses (see CommandBus's own docstring for why this can't just be a direct TaskController.enqueue call from dispatchMessage: TaskController's queue, like Blackboard, is tick-thread-only, and dispatchMessage runs on the WebSocket library's own thread). `recipientEntityId` null means "give to the caller" (no recipient argument -- drop at the bot's own feet, no navigation needed). `item` is always a concrete registry id by the time it reaches here -- "the last item picked up" is resolved Python-side (minebot/bot/inventory.py, off InventoryTracker.last_gained_item), never left for the mod to guess (see GiveTask's own docstring for why: a single source of truth for that fact, not two independently-tracked ones). `quantity <= 0` means "the whole stack" (see InventoryController.dropItem()'s own docstring). */
+    record Give(Integer recipientEntityId, String item, int quantity) implements Command {
+    }
 }

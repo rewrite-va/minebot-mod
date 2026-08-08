@@ -105,7 +105,16 @@ public final class LegsFleeNode implements StateNode<LegsState> {
             return;
         }
         ctx.blackboard.put(NavIntent.NAV_TARGET, new NavIntent.Target(retreatPoint, ARRIVAL_DISTANCE));
-        LegsNavigateNode.walkTowardNavTarget(ctx);
+        // Always sprint while fleeing -- per explicit direction, speed
+        // matters more than anything else while trying to put distance
+        // between the bot and danger (see walkTowardNavTarget's own
+        // docstring for the alwaysSprint parameter). Also never path
+        // through water while fleeing (avoidLiquid=true) -- per explicit
+        // direction ("when legs fleeing, avoid going into water"): a bot
+        // slowed/trapped in water mid-retreat is worse off than one that
+        // took a slightly longer dry route (see walkTowardNavTarget's own
+        // docstring for the avoidLiquid parameter).
+        LegsNavigateNode.walkTowardNavTarget(ctx, true, true);
     }
 
     @Override

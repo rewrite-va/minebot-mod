@@ -99,7 +99,7 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
 
     @Override
     public void onTick(final TickContext ctx) {
-        walkTowardNavTarget(ctx);
+        walkTowardNavTarget(ctx, false, false);
     }
 
     @Override
@@ -119,10 +119,30 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
      * now" problem, and NAVIGATE/FLEE are never active at the same time
      * (see LegsStateMachine's own edges), so there's no real reason for
      * two separate implementations of it.
+     *
+     * `alwaysSprint` sprints whenever actually walking forward, not only
+     * while jumping (see below) -- LegsFleeNode passes true (per explicit
+     * direction: fleeing should always sprint, speed matters more than
+     * anything else while trying to put distance between the bot and
+     * danger), LegsNavigateNode passes false, keeping ordinary navigation
+     * unchanged (walking calmly rather than sprinting everywhere by
+     * default, matching the old shared pipeline's own jump-triggered-only
+     * sprint heuristic). Real vanilla sprint requires forward movement
+     * (see setDirectionalKeys/Minecraft's own sprint key handling), so
+     * this is safe to request unconditionally whenever `walking` is true
+     * -- it simply has no effect on ticks where the bot isn't actually
+     * moving forward at all.
+     *
+     * `avoidLiquid` is forwarded straight to PathTracker.maybeReplan/
+     * Movements (see their own docstrings) -- LegsFleeNode passes true
+     * per explicit direction ("when legs fleeing, avoid going into
+     * water"), LegsNavigateNode passes false, keeping ordinary navigation
+     * free to cross water when that's genuinely the shortest route.
      */
-    static void walkTowardNavTarget(final TickContext ctx) {
+    static void walkTowardNavTarget(final TickContext ctx, final boolean alwaysSprint, final boolean avoidLiquid) {
         NavIntent.Target target = ctx.blackboard.get(NavIntent.NAV_TARGET);
         if (target == null) {
+            // QUESTION: why do we set a MovementIntent here on each tick?
             ctx.input.setIntent(new MovementIntent());
             ctx.blackboard.put(WAYPOINT_COORDINATES, null);
             return;
@@ -137,7 +157,7 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         double targetY = targetPosition.y();
         double targetZ = targetPosition.z();
 
-        ctx.pathTracker.maybeReplan(ctx.level, ctx.player, selfX, selfY, selfZ, targetX, targetY, targetZ, stopDistanceValue);
+        ctx.pathTracker.maybeReplan(ctx.level, ctx.player, selfX, selfY, selfZ, targetX, targetY, targetZ, stopDistanceValue, avoidLiquid);
         Move waypoint = ctx.pathTracker.nextWaypoint(selfX, selfY, selfZ, ctx.player.onGround());
         ctx.blackboard.put(WAYPOINT_COORDINATES, waypoint != null ? new BlockPos(waypoint.x, waypoint.y, waypoint.z) : null);
 
@@ -188,6 +208,9 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         double dy = aimY - selfY;
         if (walking && dy > 0.1 && !landingOnFarmland) {
             intent.jump = true;
+            intent.sprint = true;
+        }
+        if (walking && alwaysSprint) {
             intent.sprint = true;
         }
 

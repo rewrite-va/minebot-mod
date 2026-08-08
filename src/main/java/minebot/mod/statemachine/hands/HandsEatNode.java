@@ -1,13 +1,12 @@
 package minebot.mod.statemachine.hands;
 
-import minebot.mod.InventoryActions;
+import minebot.mod.InventoryController;
 import minebot.mod.statemachine.BlackboardKey;
 import minebot.mod.statemachine.StateNode;
 import minebot.mod.statemachine.TickContext;
 import net.minecraft.client.Minecraft;
-import net.minecraft.core.component.DataComponents;
 import net.minecraft.world.entity.player.Inventory;
-import net.minecraft.world.food.FoodProperties;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 
 /**
@@ -43,6 +42,41 @@ import net.minecraft.world.item.ItemStack;
  * TARGET_ENTITY_ID and Legs' own current state directly rather than
  * LegsFleeNode reaching back into Hands' concerns.
  *
+ * Selecting WHICH food to eat is InventoryController.selectFood()'s job
+ * (scan + moveToHotbar in one call, see its own docstring for why this
+ * node stops doing that inline -- inventory logic consolidated out of
+ * Hands per explicit direction) -- this node only holds the real keyUse
+ * keybind once a food is selected, and tracks bite completion (below).
+ *
+ * isBiteStillProtected() exists for HandsStateMachine's own debounce (see
+ * its own docstring) -- confirmed live that checking the safe-distance
+ * condition continuously (every tick) made EAT flicker in and out
+ * constantly while a chasing zombie kept crossing back within
+ * EAT_SAFE_DISTANCE, briefly interrupting an eat already in progress over
+ * and over rather than ever completing a single bite. An earlier version
+ * compared ticksSinceEnter against Item.getUseDuration() directly --
+ * confirmed live this was off by roughly a tick (the real completion
+ * tick and the computed duration didn't line up exactly, for reasons not
+ * fully pinned down -- possibly which tick the server's own consume
+ * actually lands on vs. when the client-side use timer reads as expired).
+ * Rather than fight that by fudging the comparison, this tracks the
+ * REAL, DIRECTLY OBSERVABLE effect of a completed bite instead: the
+ * total count of whichever Item is currently being eaten (across BOTH
+ * the offhand and the main inventory -- per explicit direction, slot is
+ * meaningless to the actual goal here; only the total on-hand count of
+ * that item type matters) actually dropping. Vanilla's own Consumable.
+ * onConsume() shrinks the eaten stack by exactly 1 the instant a bite
+ * finishes, so watching the item's own total count is a ground-truth
+ * signal, not a computed one that can drift by a tick. Protection lifts
+ * (isBiteStillProtected() goes false) the moment the tracked item's total
+ * count drops below what it was at bite-start. Kept as this node's own
+ * private state (see the fields below), not published to the Blackboard
+ * -- this is internal lifecycle bookkeeping for one node's own decision,
+ * not a cross-SM fact anything else needs to read, so HandsStateMachine
+ * just calls isBiteStillProtected() directly on the same node instance it
+ * already holds a reference to, the same way it already calls the static
+ * lowHealth()/hasFood() helpers below.
+ *
  * NEEDS_HEAL is still published (moved here from the deleted
  * GeneralSelfHealNode, same key/meaning: true for every tick this node
  * is genuinely active and trying to eat) -- purely informational now
@@ -51,10 +85,6 @@ import net.minecraft.world.item.ItemStack;
  * why reacting to NEEDS_HEAL specifically would have deadlocked: FLEE
  * gating on "Hands already eating" while Hands:EAT's own entry now gates
  * on FLEE being active AND far enough from the threat).
- *
- * "Is this food" is a data-component check (DataComponents.FOOD), not the
- * older Item.getFoodProperties() method, which no longer exists in this
- * version -- confirmed via decompiled ItemStack/DataComponentHolder.
  *
  * IMPORTANT gating subtlety (found via decompiled Player/Consumable
  * source): eating is gated on HUNGER, not health -- Player.canEat(canAlwaysEat)
@@ -87,8 +117,23 @@ public final class HandsEatNode implements StateNode<HandsState> {
     /** True for every tick this node is genuinely active (trying to eat) -- purely informational (surfaced on StatusHud); NOT read by Legs:FLEE (see this class's own docstring for why). Always false/absent once this state exits (see onExit). */
     public static final BlackboardKey<Boolean> NEEDS_HEAL = new BlackboardKey<>("NEEDS_HEAL");
 
+    // Internal debounce bookkeeping -- see this class's own docstring for
+    // why this tracks a real, observable "did the bite actually finish"
+    // signal (the eaten Item's own TOTAL on-hand count dropping) rather
+    // than a computed tick count, and why it stays a private field rather
+    // than a published Blackboard fact. eatingItem is WHICH Item the
+    // current bite is being eaten from (identity, not a specific stack/
+    // slot); countAtBiteStart is that item's own total count (offhand +
+    // main inventory) at the moment THIS bite started. eatingItem is null
+    // whenever nothing is currently committed to (before the first real
+    // tick, or once a bite's completion has already been observed) --
+    // isBiteStillProtected() only ever reports true while it's non-null.
+    private Item eatingItem;
+    private int countAtBiteStart;
+
     @Override
     public void onEnter(final TickContext ctx, final HandsState previousState) {
+        eatingItem = null;
         ctx.blackboard.put(NEEDS_HEAL, true);
     }
 
@@ -96,36 +141,62 @@ public final class HandsEatNode implements StateNode<HandsState> {
     public void onTick(final TickContext ctx) {
         ctx.blackboard.put(NEEDS_HEAL, true);
 
-        // Prefer the offhand if it's edible AND actually eatable right
-        // now -- a canAlwaysEat item there beats hunting through the
-        // main inventory, and needs no hotbar selection at all.
-        if (isEatableNow(ctx, ctx.player.getOffhandItem())) {
-            holdUseKey();
-            return;
+        if (eatingItem != null && totalCount(ctx, eatingItem) < countAtBiteStart) {
+            // A real completed bite -- vanilla's own Consumable.
+            // onConsume() shrinks the eaten item's total count by exactly
+            // 1 the instant it finishes.
+            eatingItem = null;
         }
 
-        Inventory inventory = ctx.player.getInventory();
-        for (int slot = 0; slot < Inventory.INVENTORY_SIZE; slot++) {
-            ItemStack stack = inventory.getItem(slot);
-            if (!isEatableNow(ctx, stack)) {
-                continue;
-            }
-            InventoryActions.moveToHotbar(ctx.player, slot, Inventory.isHotbarSlot(slot) ? slot : 8);
-            holdUseKey();
+        Item selected = InventoryController.selectFood(ctx.player);
+        if (selected == null) {
+            // Nothing eatable right now (defensive only -- HandsStateMachine's
+            // own entry/exit edges already gate this state on hasFood(),
+            // so this shouldn't normally be reachable, but don't hold a
+            // stale keyUse if it ever is).
+            eatingItem = null;
+            releaseUseKey();
             return;
         }
-
-        // Nothing eatable right now (defensive only -- HandsStateMachine's
-        // own entry/exit edges already gate this state on hasFood(),
-        // so this shouldn't normally be reachable, but don't hold a stale
-        // keyUse if it ever is).
-        releaseUseKey();
+        if (eatingItem == null) {
+            commitToBite(ctx, selected);
+        }
+        holdUseKey();
     }
 
     @Override
     public void onExit(final TickContext ctx) {
         releaseUseKey();
         ctx.blackboard.put(NEEDS_HEAL, false);
+        eatingItem = null;
+    }
+
+    /** True while a bite is genuinely still in progress (hasn't yet been observed to complete) -- see this class's own docstring for why HandsStateMachine calls this directly (not via the Blackboard) to debounce its own "too close to eat" exit check. False before any tick has actually committed to a real item, and false again the instant its total count is observed to drop. */
+    boolean isBiteStillProtected() {
+        return eatingItem != null;
+    }
+
+    /** Commits to tracking THIS bite -- called once per bite, the first tick after the previous one (if any) completed or this node was freshly entered. */
+    private void commitToBite(final TickContext ctx, final Item item) {
+        eatingItem = item;
+        countAtBiteStart = totalCount(ctx, item);
+    }
+
+    /** `item`'s total count across the offhand AND the whole main inventory -- what actually matters for "did a bite complete" (see this class's own docstring for why slot/specific-stack tracking isn't used: moveToHotbar or ordinary inventory shuffling could otherwise be mistaken for a completed bite, or a completed bite on a stack that then got reordered could be missed). */
+    private static int totalCount(final TickContext ctx, final Item item) {
+        int total = 0;
+        ItemStack offhand = ctx.player.getOffhandItem();
+        if (offhand.getItem() == item) {
+            total += offhand.getCount();
+        }
+        Inventory inventory = ctx.player.getInventory();
+        for (int slot = 0; slot < Inventory.INVENTORY_SIZE; slot++) {
+            ItemStack stack = inventory.getItem(slot);
+            if (stack.getItem() == item) {
+                total += stack.getCount();
+            }
+        }
+        return total;
     }
 
     /**
@@ -143,44 +214,8 @@ public final class HandsEatNode implements StateNode<HandsState> {
         Minecraft.getInstance().options.keyUse.setDown(false);
     }
 
-    private static boolean isEdible(final ItemStack stack) {
-        return !stack.isEmpty() && stack.get(DataComponents.FOOD) != null;
-    }
-
-    /**
-     * True only if starting to eat this stack right now would actually
-     * succeed, per the real vanilla gate: Consumable's startConsuming()
-     * -> canConsume() -> Player.canEat(canAlwaysEat). Mirroring canEat()
-     * itself (rather than re-deriving invulnerable/hunger state by hand)
-     * keeps this correct if that logic ever changes. Package-visible (not
-     * private) so this class's own hasFood() can reuse the exact same
-     * gate for HandsStateMachine's entry/exit edges, rather than
-     * re-deriving a second version of it.
-     */
-    static boolean isEatableNow(final TickContext ctx, final ItemStack stack) {
-        if (!isEdible(stack)) {
-            return false;
-        }
-        FoodProperties food = stack.get(DataComponents.FOOD);
-        return ctx.player.canEat(food.canAlwaysEat());
-    }
-
     /** True if health has dropped low enough to consider eating at all -- shared by HandsStateMachine's own entry edge, and by LegsStateMachine's own FLEE trigger (see LegsFleeNode's own docstring for why Legs reacts to this SAME fact directly, rather than to whether Hands has actually started eating yet). Public (not package-private) specifically for that cross-package Legs use. */
     public static boolean lowHealth(final TickContext ctx) {
         return ctx.player.getHealth() <= ctx.player.getMaxHealth() * LOW_HEALTH_FRACTION;
-    }
-
-    /** True if ANY real food (offhand or inventory) would actually be eatable right now -- same scan onTick performs, exposed for HandsStateMachine's own entry/exit edges so EAT never enters/stays when it has nothing to act on, AND for LegsStateMachine's own FLEE exit edge: "hunger is full, so there is no way to heal" is exactly !hasFood() (canAlwaysEat items like a golden apple still count as eatable at full hunger -- see isEatableNow's own docstring -- so this is a more precise check than a raw hunger-level read would be), per explicit direction that FLEE should give up and let Legs resume combat positioning once eating genuinely can't help. Renamed from canEatSomething (see git history) -- the hunger-gating half of "eatable" is Player.canEat() itself (called directly inside isEatableNow, no wrapper needed for that part); what this method actually adds on top is the inventory/offhand SCAN for whether any such stack exists at all. Public (not package-private) for that same cross-package Legs use lowHealth() already has. */
-    public static boolean hasFood(final TickContext ctx) {
-        if (isEatableNow(ctx, ctx.player.getOffhandItem())) {
-            return true;
-        }
-        Inventory inventory = ctx.player.getInventory();
-        for (int slot = 0; slot < Inventory.INVENTORY_SIZE; slot++) {
-            if (isEatableNow(ctx, inventory.getItem(slot))) {
-                return true;
-            }
-        }
-        return false;
     }
 }

@@ -1,6 +1,6 @@
 package minebot.mod.statemachine.playerintention;
 
-import minebot.mod.WeaponSelector;
+import minebot.mod.InventoryController;
 import minebot.mod.statemachine.BlackboardKey;
 import minebot.mod.statemachine.TickContext;
 import net.minecraft.world.entity.Entity;
@@ -25,17 +25,26 @@ import net.minecraft.world.phys.Vec3;
  * DEFEND most recently published them, with zero awareness of which one
  * that was.
  *
- * SELECTED_WEAPON is computed ONCE per tick via WeaponSelector.choose()
- * -- every consumer reads the SAME published value rather than
- * independently re-calling WeaponSelector.choose() itself. Deliberately
- * NOT a bundled "CombatContext" struct grouping target+weapon+everything
- * -- considered and rejected: every other cross-SM fact in this codebase
- * is its own independently-typed BlackboardKey, and a single aggregate
- * object would be a new, different data-modeling convention just to save
- * one WeaponSelector.choose() call's worth of duplication. Re-computed
- * every tick (not cached once on entry) specifically so a weapon
- * breaking mid-fight is picked up immediately -- WeaponSelector.choose()
- * is a pure, stateless read of current inventory, so there's no
+ * SELECTED_WEAPON is computed ONCE per tick via InventoryController.
+ * findBestWeapon(player, distanceToTarget) -- every consumer reads the
+ * SAME published value rather than independently re-calling
+ * findBestWeapon() itself. distanceToTarget is computed here (the real
+ * live player<->target distance, same value used for the kiting decision
+ * just below) and fed into findBestWeapon so it can drop any candidate
+ * that can't actually reach the target from here and rank the survivors
+ * by real damage -- see findBestWeapon's own docstring for why this
+ * replaced the old "always prefer a bow with ammo" rule: at melee
+ * distance, whichever weapon deals more damage should win, which is
+ * usually the melee weapon. Deliberately NOT a bundled "CombatContext"
+ * struct grouping target+weapon+everything -- considered and rejected:
+ * every other cross-SM fact in this codebase is its own independently-
+ * typed BlackboardKey, and a single aggregate object would be a new,
+ * different data-modeling convention just to save one
+ * InventoryController.findBestWeapon() call's worth of duplication.
+ * Re-computed every tick (not cached once on entry) specifically so a
+ * weapon breaking mid-fight -- or the target's distance simply changing
+ * -- is picked up immediately: InventoryController.findBestWeapon() is a
+ * pure, stateless read of current inventory + distance, so there's no
  * staleness risk to guard against by caching it.
  *
  * Range is weapon-dependent and NOT range-managed by Hands at all --
@@ -68,10 +77,14 @@ import net.minecraft.world.phys.Vec3;
  * the charge nears ready again, it switches back to approaching/holding
  * at melee range so the next swing can land the instant it's charged.
  *
- * BOW KITING: unchanged trigger (target has closed inside melee reach
- * while a bow is selected) but a real, modest BOW_RETREAT_DISTANCE (5)
- * instead of retreating all the way back to the full BOW_RANGE (15) --
- * bow range "can be at any distance" (a bow can still fire effectively
+ * BOW KITING (same treatment for a crossbow -- both are Kind.BOW/
+ * Kind.CROSSBOW under the single usingRanged flag below, see
+ * InventoryController.findBestWeapon's own docstring for why they're a
+ * single reach category): unchanged trigger (target has closed inside
+ * melee reach while a ranged weapon is selected) but a real, modest
+ * BOW_RETREAT_DISTANCE (5) instead of retreating all the way back to the
+ * full BOW_RANGE (15) -- ranged range "can be at any distance" (a bow/
+ * crossbow can still fire effectively
  * from just outside melee reach), so re-opening the full 15 blocks every
  * time a target gets close is unnecessary; 5 is enough to be safe from
  * melee reach again.
@@ -97,20 +110,20 @@ public final class CombatEngagement {
     private CombatEngagement() {
     }
 
-    // AbstractSkeleton/AbstractIllager's own real search radius for
-    // "nearest hostile" scans elsewhere in vanilla is much larger than
-    // this, but a bare `!kill`/nearby-threat scan finding something 30+
-    // blocks away and dragging the bot off toward it unprompted would be
-    // surprising -- kept modest, matching the old EntityFinder-backed
-    // !attack's own default before deletion.
-    public static final double SEARCH_RADIUS = 16.0;
-    // BowItem.DEFAULT_RANGE (confirmed via decompiled source, same value
-    // the old pre-deletion tickAttack's own ATTACK_BOW_RANGE used) -- the
-    // real distance vanilla itself considers a bow's effective range.
+    // Raised from the original 16.0 per explicit direction (default/auto-
+    // defend engagement was too short-ranged in practice) -- still well
+    // under AbstractSkeleton/AbstractIllager's own much larger real
+    // "nearest hostile" scan radius elsewhere in vanilla.
+    public static final double SEARCH_RADIUS = 32.0;
+    // BowItem.DEFAULT_RANGE == CrossbowItem.DEFAULT_RANGE (confirmed via
+    // decompiled source, same value the old pre-deletion tickAttack's own
+    // ATTACK_BOW_RANGE used) -- the real distance vanilla itself
+    // considers either ranged weapon's effective range.
     private static final double BOW_RANGE = 15.0;
-    // How far a bow retreats to once the target's closed inside melee
-    // reach -- NOT the full BOW_RANGE (see this class's own docstring for
-    // why re-opening the whole 15 blocks every time isn't necessary).
+    // How far a bow/crossbow retreats to once the target's closed inside
+    // melee reach -- NOT the full BOW_RANGE (see this class's own
+    // docstring for why re-opening the whole 15 blocks every time isn't
+    // necessary).
     private static final double BOW_RETREAT_DISTANCE = 5.0;
     // Charge threshold below which melee kiting retreats rather than
     // approaches/holds -- deliberately not 0.0 (retreat starts the
@@ -126,29 +139,31 @@ public final class CombatEngagement {
     /** The live target's entity id, or null when nothing is currently being fought -- Hands needs the real Entity reference itself (to call gameMode.attack(player, entity)), not just a position, so a position-only publish the way FOLLOW does isn't enough here. */
     public static final BlackboardKey<Integer> TARGET_ENTITY_ID = new BlackboardKey<>("TARGET_ENTITY_ID");
 
-    /** WeaponSelector's own Choice for the CURRENT tick, or null if nothing beats bare hands -- see this class's own docstring for why this is computed once here and shared. */
-    public static final BlackboardKey<WeaponSelector.Choice> SELECTED_WEAPON = new BlackboardKey<>("SELECTED_WEAPON");
+    /** InventoryController's own Choice for the CURRENT tick, or null if nothing beats bare hands -- see this class's own docstring for why this is computed once here and shared. */
+    public static final BlackboardKey<InventoryController.Choice> SELECTED_WEAPON = new BlackboardKey<>("SELECTED_WEAPON");
 
     /** Publishes real, freshly-computed NAV_TARGET/NAV_ARRIVED/TARGET_ENTITY_ID/SELECTED_WEAPON for `target` -- call every tick (including the tick a fight is first entered, from onEnter, not just onTick -- see PlayerIntentionKillNode's own docstring for the live bug that skipping onEnter caused: a newly-entered node's onTick doesn't run until the NEXT tick, so waiting for it leaves stale data from whatever PlayerIntention state this interrupted visible for one real tick). */
     public static void publish(final TickContext ctx, final Entity target) {
-        WeaponSelector.Choice weapon = WeaponSelector.choose(ctx.player);
-        ctx.blackboard.put(SELECTED_WEAPON, weapon);
-        ctx.blackboard.put(TARGET_ENTITY_ID, target.getId());
-
-        boolean usingBow = weapon != null && weapon.kind() == WeaponSelector.Kind.BOW;
-        double meleeRange = ctx.player.getAttributeValue(Attributes.ENTITY_INTERACTION_RANGE);
-        double range = usingBow ? BOW_RANGE : meleeRange;
         Vec3 targetPosition = target.position();
         double distanceToTarget = ctx.player.position().distanceTo(targetPosition);
 
-        boolean shouldRetreat = usingBow
+        InventoryController.Choice weapon = InventoryController.findBestWeapon(ctx.player, distanceToTarget, target);
+        ctx.blackboard.put(SELECTED_WEAPON, weapon);
+        ctx.blackboard.put(TARGET_ENTITY_ID, target.getId());
+
+        boolean usingRanged = weapon != null
+            && (weapon.kind() == InventoryController.Kind.BOW || weapon.kind() == InventoryController.Kind.CROSSBOW);
+        double meleeRange = ctx.player.getAttributeValue(Attributes.ENTITY_INTERACTION_RANGE);
+        double range = usingRanged ? BOW_RANGE : meleeRange;
+
+        boolean shouldRetreat = usingRanged
             ? distanceToTarget < meleeRange
             : distanceToTarget <= meleeRange && ctx.player.getAttackStrengthScale(0.0f) < MELEE_RETREAT_CHARGE_THRESHOLD;
 
         Vec3 navPosition;
         boolean withinRange;
         if (shouldRetreat) {
-            double retreatDistance = usingBow ? BOW_RETREAT_DISTANCE : meleeRange;
+            double retreatDistance = usingRanged ? BOW_RETREAT_DISTANCE : meleeRange;
             navPosition = retreatPoint(ctx, targetPosition, retreatDistance);
             withinRange = ctx.player.position().distanceTo(navPosition) <= RETREAT_ARRIVAL_DISTANCE;
         } else {

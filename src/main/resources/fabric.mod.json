@@ -25,5 +25,8 @@
   },
   "suggests": {
     "modmenu": "*"
-  }
+  },
+  "mixins": [
+    "minebot-mod.mixins.json"
+  ]
 }

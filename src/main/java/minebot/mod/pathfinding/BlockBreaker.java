@@ -1,6 +1,6 @@
 package minebot.mod.pathfinding;
 
-import minebot.mod.InventoryActions;
+import minebot.mod.InventoryController;
 import minebot.mod.MinebotMod;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.MultiPlayerGameMode;
@@ -840,7 +840,7 @@ public final class BlockBreaker {
                 bestSlot, inventory.getItem(bestSlot).getItem(), bestSpeed, selectedSlot, selectedStack.getItem(),
                 selectedStack.getDestroySpeed(state)
             );
-            InventoryActions.moveToHotbar(player, bestSlot, 8);
+            InventoryController.moveToHotbar(player, bestSlot, 8);
             MinebotMod.LOGGER.info(
                 "mining: after switch, selected slot is now {} ({})",
                 inventory.getSelectedSlot(), inventory.getItem(inventory.getSelectedSlot()).getItem()

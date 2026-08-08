@@ -8,8 +8,10 @@ import minebot.mod.statemachine.playerintention.CombatEngagement;
 import minebot.mod.statemachine.playerintention.PlayerIntentionState;
 import minebot.mod.statemachine.legs.LegsState;
 
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Predicate;
 
 /**
@@ -47,6 +49,21 @@ import java.util.function.Predicate;
  * matching the old shared pipeline's own "combat aim always overrides
  * waypoint aim" rule (see HeadState's own docstring).
  *
+ * legsNavigating checks Legs is in ANY state that walks toward a real
+ * NavIntent-published target via WAYPOINT_COORDINATES -- NAVIGATE,
+ * GO_TO_DEATH_POSITION, or PICKUP_ITEMS (LEGS_NAVIGATING_STATES below) --
+ * not just NAVIGATE specifically. Confirmed
+ * live this mattered: an earlier version checked only
+ * LegsState.NAVIGATE, so Head fell back to IDLE (frozen look direction)
+ * for the entire GO_TO_DEATH_POSITION/PICKUP_ITEMS recovery walk after a
+ * death, reported live as "when GOTODEATHPOSITION, head is IDLE, why
+ * this is not navigate" -- both recovery states publish through the same
+ * WAYPOINT_COORDINATES/NAV_TARGET channel NAVIGATE does (see
+ * LegsGoToDeathPositionNode/LegsPickupItemsNode's own docstrings), so
+ * HeadNavigateNode's existing look-at-the-waypoint logic is already
+ * exactly correct for them too, the same reasoning FLEE's own mapping to
+ * the same node already established.
+ *
  * FLEE mirrors Legs:FLEE directly (ctx.blackboard.get(legsStateMachine)
  * == LegsState.FLEE), the same "read a peer's published state" shape
  * NAVIGATE already uses for Legs:NAVIGATE -- and is checked BEFORE
@@ -70,6 +87,13 @@ public final class HeadStateMachine {
     private HeadStateMachine() {
     }
 
+    /** Every LegsState that walks toward a real NavIntent-published target via WAYPOINT_COORDINATES -- see this class's own docstring for why this is explicit rather than just LegsState.NAVIGATE (GO_TO_DEATH_POSITION/PICKUP_ITEMS need Head to look toward their own waypoints too). Deliberately excludes FLEE, which has its own dedicated HeadState/edges below even though it maps to the same underlying HeadNavigateNode instance. */
+    private static final Set<LegsState> LEGS_NAVIGATING_STATES = EnumSet.of(
+        LegsState.NAVIGATE,
+        LegsState.GO_TO_DEATH_POSITION,
+        LegsState.PICKUP_ITEMS
+    );
+
     public static StateMachine<HeadState> create(final StateMachine<LegsState> legsStateMachine, final StateMachine<PlayerIntentionState> playerIntentionStateMachine) {
         HeadNavigateNode navigateNode = new HeadNavigateNode();
         Map<HeadState, StateNode<HeadState>> nodes = Map.of(
@@ -81,7 +105,7 @@ public final class HeadStateMachine {
 
         Predicate<TickContext> legsFleeing = ctx -> ctx.blackboard.get(legsStateMachine) == LegsState.FLEE;
         Predicate<TickContext> hasLiveThreat = ctx -> ctx.blackboard.get(CombatEngagement.TARGET_ENTITY_ID) != null;
-        Predicate<TickContext> legsNavigating = ctx -> ctx.blackboard.get(legsStateMachine) == LegsState.NAVIGATE;
+        Predicate<TickContext> legsNavigating = ctx -> LEGS_NAVIGATING_STATES.contains(ctx.blackboard.get(legsStateMachine));
 
         List<Edge<HeadState>> edges = List.of(
             // FLEE checked first from every other state -- see this

@@ -3,6 +3,9 @@ package minebot.mod;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.animal.bee.Bee;
+import net.minecraft.world.entity.animal.polarbear.PolarBear;
+import net.minecraft.world.entity.animal.wolf.Wolf;
 import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
@@ -63,18 +66,16 @@ public final class EntityFinder {
     }
 
     /**
-     * Returns the nearest real hostile entity (implements the vanilla
-     * `Enemy` marker interface -- confirmed via decompiled source this is
-     * the correct general check, not `instanceof Monster`: most hostiles
-     * extend the abstract `Monster` class, which itself implements
-     * `Enemy`, but at least one real vanilla hostile (EnderDragon) is an
-     * `Enemy` without extending `Monster` at all, so checking the
-     * interface directly covers both without needing a second case)
-     * within `radius` blocks of `center` -- backs a bare `!kill` with no
-     * query (PlayerIntention:KILL's own "attack the nearest hostile mob" ask),
-     * and PlayerIntention:DEFEND's own continuous threat scan around the defend
-     * target. Same real-sphere-vs-AABB-box distance filtering as
-     * findNearestEntity above.
+     * Returns the nearest real hostile entity within `radius` blocks of
+     * `center` -- backs a bare `!kill` with no query (PlayerIntention:KILL's
+     * own "attack the nearest hostile mob" ask), and PlayerIntention:DEFEND's
+     * own continuous threat scan around the defend target. Same
+     * real-sphere-vs-AABB-box distance filtering as findNearestEntity
+     * above. "Hostile" is isHostileNow(entity) below, not just
+     * `instanceof Enemy` -- see its own docstring for why a live-anger
+     * check on top of the marker interface is needed (a peaceful wolf/
+     * bear/bee isn't a threat, but an angered one is, and neither
+     * implements Enemy at all in vanilla).
      */
     public static Entity findNearestHostile(final ClientLevel level, final Vec3 center, final double radius) {
         AABB searchBox = AABB.ofSize(center, radius * 2, radius * 2, radius * 2);
@@ -83,7 +84,7 @@ public final class EntityFinder {
         Entity nearest = null;
         double nearestDistanceSquared = Double.MAX_VALUE;
 
-        for (Entity entity : level.getEntitiesOfClass(Entity.class, searchBox, e -> e instanceof Enemy)) {
+        for (Entity entity : level.getEntitiesOfClass(Entity.class, searchBox, EntityFinder::isHostileNow)) {
             double distanceSquared = entity.distanceToSqr(center);
             if (distanceSquared > radiusSquared) {
                 continue;
@@ -95,5 +96,62 @@ public final class EntityFinder {
         }
 
         return nearest;
+    }
+
+    // How close a wild adult PolarBear needs a baby PolarBear to be
+    // before it turns hostile toward nearby players -- matches vanilla's
+    // own PolarBearAttackPlayersGoal.canUse() trigger box exactly
+    // (getBoundingBox().inflate(8.0, 4.0, 8.0), confirmed via decompiled
+    // source), a pure proximity condition that's fully client-computable
+    // without needing PolarBear's own (server-only, unsynced) anger
+    // field at all.
+    private static final double POLAR_BEAR_CUB_ALERT_RADIUS = 8.0;
+
+    /**
+     * True for guaranteed-hostile mobs (the vanilla `Enemy` marker
+     * interface -- confirmed via decompiled source this is the correct
+     * general check, not `instanceof Monster`: most hostiles extend the
+     * abstract `Monster` class, which itself implements `Enemy`, but at
+     * least one real vanilla hostile (EnderDragon) is an `Enemy` without
+     * extending `Monster` at all) OR a normally-neutral mob that's
+     * CURRENTLY hostile -- per explicit direction: "some non-hostile can
+     * turn hostiles like bears that are near to a baby bear, or wolves
+     * when attacked... check if the non-hostiles are actually in hostile
+     * mode".
+     *
+     * Vanilla's own NeutralMob.isAngry() would be the exact, authoritative
+     * check, but confirmed via decompiled source that its backing anger
+     * field is only client-synced (SynchedEntityData) for Wolf and Bee --
+     * PolarBear/IronGolem/ZombifiedPiglin/EnderMan store it as a plain
+     * server-only field with no client-visible equivalent, and there's no
+     * other generic "has a target"/"is attacking" signal on Mob/
+     * LivingEntity to fall back on for those. So this only widens
+     * detection for the two mobs where a real client-side signal exists
+     * (Wolf, Bee, both via isAngry()) plus PolarBear via the specific
+     * client-computable proximity trigger described above (not its real
+     * anger state, which stays unreadable) -- IronGolem/ZombifiedPiglin/
+     * EnderMan are left as `Enemy`-only for now, same as before this
+     * change, since there's genuinely no way to detect their live
+     * hostility from the client.
+     */
+    private static boolean isHostileNow(final Entity entity) {
+        if (entity instanceof Enemy) {
+            return true;
+        }
+        if (entity instanceof Wolf wolf) {
+            return wolf.isAngry();
+        }
+        if (entity instanceof Bee bee) {
+            return bee.isAngry();
+        }
+        if (entity instanceof PolarBear bear && !bear.isBaby()) {
+            AABB cubAlertBox = bear.getBoundingBox().inflate(POLAR_BEAR_CUB_ALERT_RADIUS, POLAR_BEAR_CUB_ALERT_RADIUS / 2, POLAR_BEAR_CUB_ALERT_RADIUS);
+            return !level(entity).getEntitiesOfClass(PolarBear.class, cubAlertBox, PolarBear::isBaby).isEmpty();
+        }
+        return false;
+    }
+
+    private static ClientLevel level(final Entity entity) {
+        return (ClientLevel) entity.level();
     }
 }

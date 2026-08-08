@@ -19,6 +19,21 @@ import net.minecraft.world.phys.Vec3;
  * like every other "walk toward a point" behavior, not on the
  * PlayerIntention axis.
  *
+ * Waits for ctx.player.isDeadOrDying() to actually go false before
+ * measuring distance/walking at all -- confirmed live this state was
+ * entered/finished within the SAME tick, over and over, never actually
+ * walking anywhere: LegsStateMachine enters this node the instant
+ * DeathWatcher publishes a fresh DEATH_POSITION, which happens on the
+ * very same tick DeathWatcher also calls player.respawn() -- but
+ * respawn() is a real server round-trip, not an instant local teleport
+ * (see DeathWatcher's own docstring/the old PlayerIntionDeadNode's same
+ * documented wait), so the player's own position hadn't actually moved
+ * yet on that first tick -- still standing exactly where it died, reading
+ * as ~0 distance from deathPosition and instantly satisfying
+ * NavIntent.defaultStopDistance(), long before any real walk happened.
+ * Standing still and reporting not-finished while still dead avoids
+ * measuring against that stale pre-teleport position at all.
+ *
  * isFinished() once within NavIntent.defaultStopDistance() of the death
  * position (i.e. NAV_ARRIVED) -- at that point LegsStateMachine's own
  * exit edge hands off to LegsPickupItemsNode, which does its own, much
@@ -43,6 +58,15 @@ public final class LegsGoToDeathPositionNode implements StateNode<LegsState> {
 
     @Override
     public void onTick(final TickContext ctx) {
+        if (ctx.player.isDeadOrDying()) {
+            // Still mid-respawn -- see this class's own docstring for why
+            // measuring/walking against the player's own position is
+            // unreliable until this goes false. Just wait it out.
+            ctx.blackboard.put(NavIntent.NAV_TARGET, null);
+            ctx.blackboard.put(NavIntent.NAV_ARRIVED, true);
+            return;
+        }
+
         Vec3 deathPosition = ctx.blackboard.get(DeathWatcher.DEATH_POSITION);
         if (deathPosition == null) {
             // Defensive only -- LegsStateMachine only ever enters this
@@ -57,7 +81,7 @@ public final class LegsGoToDeathPositionNode implements StateNode<LegsState> {
         }
 
         ctx.blackboard.put(NavIntent.NAV_TARGET, new NavIntent.Target(deathPosition, NavIntent.defaultStopDistance()));
-        LegsNavigateNode.walkTowardNavTarget(ctx);
+        LegsNavigateNode.walkTowardNavTarget(ctx, false, false);
         double distance = ctx.player.position().distanceTo(deathPosition);
         boolean withinRange = distance <= NavIntent.defaultStopDistance();
         ctx.blackboard.put(NavIntent.NAV_ARRIVED, withinRange);

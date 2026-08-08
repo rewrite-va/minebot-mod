@@ -1,8 +1,7 @@
 package minebot.mod.statemachine.hands;
 
-import minebot.mod.InventoryActions;
+import minebot.mod.InventoryController;
 import minebot.mod.MinebotMod;
-import minebot.mod.WeaponSelector;
 import minebot.mod.statemachine.StateNode;
 import minebot.mod.statemachine.TickContext;
 import minebot.mod.statemachine.playerintention.CombatEngagement;
@@ -49,13 +48,6 @@ import net.minecraft.world.phys.Vec3;
  * had) rather than holding a draw against an obstruction.
  */
 public final class HandsDrawBowNode implements StateNode<HandsState> {
-    // AbstractSkeleton.performRangedAttack's own constant (decompiled:
-    // aimed direction's Y component is dy + horizontalDistance * 0.2) --
-    // exposed here since HeadAimAtTargetNode needs the exact same value
-    // for its own arc-lifted aim point, and this is the node that owns
-    // "how a bow shot is aimed" conceptually.
-    public static final double ARC_LIFT_PER_BLOCK = 0.2;
-
     // BowItem.MAX_DRAW_DURATION -- holding this long reaches
     // getPowerForTime's max (1.0), a full-strength/full-accuracy shot,
     // matching the old BowShooter's own "always fully draw" behavior
@@ -75,8 +67,8 @@ public final class HandsDrawBowNode implements StateNode<HandsState> {
             return;
         }
 
-        WeaponSelector.Choice weapon = ctx.blackboard.get(CombatEngagement.SELECTED_WEAPON);
-        InventoryActions.moveToHotbar(ctx.player, weapon.slot(), 8);
+        InventoryController.Choice weapon = ctx.blackboard.get(CombatEngagement.SELECTED_WEAPON);
+        InventoryController.moveToHotbar(ctx.player, weapon.slot(), 8);
 
         if (!drawing) {
             drawing = true;
@@ -137,8 +129,8 @@ public final class HandsDrawBowNode implements StateNode<HandsState> {
     }
 
     private static boolean isBowSelected(final TickContext ctx) {
-        WeaponSelector.Choice weapon = ctx.blackboard.get(CombatEngagement.SELECTED_WEAPON);
-        return weapon != null && weapon.kind() == WeaponSelector.Kind.BOW;
+        InventoryController.Choice weapon = ctx.blackboard.get(CombatEngagement.SELECTED_WEAPON);
+        return weapon != null && weapon.kind() == InventoryController.Kind.BOW;
     }
 
     /** Real eye-to-eye raycast against solid blocks (ClipContext.Block.COLLIDER, matching what actually stops a real arrow) -- MISS means a clear line of sight. Fluids are deliberately not checked (ClipContext.Fluid.NONE) -- water/lava don't block a real arrow's flight the way a solid block does. */

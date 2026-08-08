@@ -53,6 +53,13 @@ public final class PathTracker {
     // range with a bow equipped and never actually backed off to shoot
     // from range.
     private double stopDistanceComputedFor = Double.NaN;
+    // Same staleness role as stopDistanceComputedFor above -- a path
+    // planned with avoidLiquid=false is not valid to keep reusing once a
+    // caller asks with avoidLiquid=true (e.g. LegsFleeNode kicking in
+    // right after LegsNavigateNode was using this same shared tracker --
+    // see PathTracker's own class docstring for why one instance is
+    // shared across every Legs node that walks), and vice versa.
+    private boolean avoidLiquidComputedFor;
 
     /**
      * (Re)computes a path toward (targetX, targetY, targetZ) if we don't
@@ -62,13 +69,20 @@ public final class PathTracker {
      * exception) when we don't have block data under our own feet yet or
      * no path is found -- callers should fall back to raw target-following
      * in that case, same as the Python port, rather than freezing.
+     *
+     * `avoidLiquid` is forwarded straight to Movements (see its own
+     * docstring) -- LegsFleeNode passes true so a retreat route never
+     * plans through water, every other caller passes false (unchanged
+     * behavior: water merely discouraged, not disallowed).
      */
     public void maybeReplan(
         final ClientLevel level, final LocalPlayer player,
         final double selfX, final double selfY, final double selfZ,
-        final double targetX, final double targetY, final double targetZ, final double stopDistance
+        final double targetX, final double targetY, final double targetZ, final double stopDistance,
+        final boolean avoidLiquid
     ) {
-        if (pathComputedFor != null && !currentPath.isEmpty() && stopDistance == stopDistanceComputedFor) {
+        if (pathComputedFor != null && !currentPath.isEmpty() && stopDistance == stopDistanceComputedFor
+            && avoidLiquid == avoidLiquidComputedFor) {
             double dx = pathComputedFor[0] - targetX;
             double dy = pathComputedFor[1] - targetY;
             double dz = pathComputedFor[2] - targetZ;
@@ -87,6 +101,7 @@ public final class PathTracker {
 
         pathComputedFor = new double[]{targetX, targetY, targetZ};
         stopDistanceComputedFor = stopDistance;
+        avoidLiquidComputedFor = avoidLiquid;
         currentPath.clear();
 
         int startX = (int) Math.floor(selfX);
@@ -101,6 +116,7 @@ public final class PathTracker {
         }
 
         Movements movements = new Movements(level, player);
+        movements.avoidLiquid = avoidLiquid;
         Move start = new Move(startX, startY, startZ, 0.0);
         GoalNear goal = new GoalNear(targetX, targetY, targetZ, stopDistance);
         AStar astar = new AStar(start, movements::getNeighbors, goal::heuristic, goal::isEnd, PATHFINDING_TIMEOUT_MILLIS);

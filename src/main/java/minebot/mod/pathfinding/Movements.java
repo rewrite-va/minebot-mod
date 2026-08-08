@@ -117,6 +117,16 @@ public final class Movements {
     public boolean allowParkour = true;
     public boolean allowSprinting = true;
     public boolean allowDig = true;
+    // False routes water/lava out of the search entirely (BLOCKED, not
+    // just the usual +1.0 liquidCost nudge) -- per explicit direction,
+    // Legs:FLEE shouldn't path INTO water while retreating from a threat
+    // (a bot mid-flee slowed/trapped in water is worse off than one that
+    // took a slightly longer dry route). Every other caller keeps liquid
+    // as a merely-discouraged, still-legal move (see getMoveForward/
+    // getMoveDiagonal's own liquidCost) -- ordinary navigation/kiting/etc.
+    // may still need to cross a stream or pond when that's genuinely the
+    // only route.
+    public boolean avoidLiquid = false;
 
     public Movements(final ClientLevel level, final LocalPlayer player) {
         this.level = level;
@@ -194,7 +204,12 @@ public final class Movements {
         // them), so they count as "empty"/safe too -- confirmed against
         // getLandingBlock's `blockLand.liquid && blockLand.safe` check on
         // the earlier Python port, which would be dead code otherwise.
-        boolean safe = isAir || isLadder || isLiquid || isDoor;
+        // avoidLiquid overrides this to false -- see its own docstring;
+        // routes liquid out of the search as BLOCKED everywhere `safe`
+        // feeds into safeOrBreak (every move type), not just the
+        // separate +1.0 liquidCost nudge getMoveForward/getMoveDiagonal
+        // already apply when it's merely discouraged, not disallowed.
+        boolean safe = (isAir || isLadder || isLiquid || isDoor) && !(avoidLiquid && isLiquid);
 
         return new BlockInfo(x, y, z, true, safe, isSolid, isLiquid, isLadder, isDoor, closedDoor, hasLoweredTopSurface);
     }

@@ -8,12 +8,13 @@ import net.minecraft.world.phys.Vec3;
 
 /**
  * Standing protection mode -- auto-fights the nearest hostile to the
- * defend target, and stays near the defend target (FOLLOW-style) between
- * fights. Unlike PlayerIntentionKillNode, DEFEND never leaves itself to fight --
- * it's a real PlayerIntention value (see its own docstring), so there's
- * no "resume back to DEFEND once the fight ends" transition needed: this
- * node just keeps publishing whichever of "follow the defend target" or
- * "fight the current threat" applies each tick, entirely within DEFEND.
+ * BOT ITSELF (not the defend target -- see below), and stays near the
+ * defend target (FOLLOW-style) between fights. Unlike PlayerIntentionKillNode,
+ * DEFEND never leaves itself to fight -- it's a real PlayerIntention value
+ * (see its own docstring), so there's no "resume back to DEFEND once the
+ * fight ends" transition needed: this node just keeps publishing
+ * whichever of "follow the defend target" or "fight the current threat"
+ * applies each tick, entirely within DEFEND.
  *
  * The defend target itself comes from PlayerIntention (re-read every
  * tick, same as PlayerIntentionFollowNode's own followEntityId) -- null
@@ -22,29 +23,61 @@ import net.minecraft.world.phys.Vec3;
  * live position, and there's nothing to walk toward between fights (the
  * bot doesn't need to follow itself) -- NAV_TARGET stays null/
  * WITHIN_RANGE stays true in that case until a threat actually appears.
+ * `anchor` is used for this follow-between-fights positioning, AND as a
+ * hard cap on which threats are even eligible to fight (withinDefendRange
+ * below) -- but NOT for ranking eligible threats against each other (see
+ * below). Per explicit direction, "the bot fights whichever ELIGIBLE
+ * threat is closest to ITSELF" even while defending someone else, not
+ * whatever's closest to the person being defended (a threat approaching
+ * the defended player from the opposite side of a large gap shouldn't
+ * outrank one already adjacent to the bot) -- but a threat too far from
+ * the defend target is dropped from consideration entirely before that
+ * ranking ever happens, REGARDLESS of how close it is to the bot: per
+ * explicit direction ("do not engage in combat too far away of the
+ * defending target, we dont want to leave the defending target alone"),
+ * chasing a threat far from the target means abandoning the target
+ * itself, which defeats the entire point of DEFEND. This applies both to
+ * picking a NEW threat (nearestThreat is discarded if too far from
+ * anchor, even if it's the closest one to the bot) and to an
+ * ALREADY-ENGAGED one (currentThreat is dropped -- a real disengage, not
+ * just "stop preferring it" -- the instant it drifts past the cap, e.g.
+ * a hostile the bot chased that then fled further away).
  *
  * Threat detection commits to a single target entity (via targetEntityId,
  * same "keep walking toward THIS SAME entity" pattern LegsPickupItemsNode
  * already established for its own item-target selection) but, UNLIKE
  * LegsPickupItemsNode, re-evaluates every tick whether a NEW threat is
- * meaningfully closer to the defend target and switches to it if so --
- * confirmed live that never switching until the current target dies is
- * wrong for defend specifically: a second hostile approaching the
- * defended player from a different angle is a more urgent danger than
- * whatever the bot happens to already be swinging at, and should
- * preempt. Gated by RETARGET_MARGIN (not a bare "nearest != current"
- * check every tick) to avoid the live-confirmed thrash risk two
- * similar-distance threats would otherwise cause (flip-flopping the
- * fight target every tick, discarding kiting progress each switch) --
- * only a threat CLEARLY closer (by more than the margin) actually
- * preempts; roughly-equidistant threats keep the current fight going
- * uninterrupted.
+ * meaningfully closer to the BOT and switches to it if so -- confirmed
+ * live that never switching until the current target dies is wrong for
+ * defend specifically: a second hostile approaching the bot from a
+ * different angle is a more urgent danger than whatever it happens to
+ * already be swinging at, and should preempt. Gated by RETARGET_MARGIN
+ * (not a bare "nearest != current" check every tick) to avoid the
+ * live-confirmed thrash risk two similar-distance threats would
+ * otherwise cause (flip-flopping the fight target every tick, discarding
+ * kiting progress each switch) -- only a threat CLEARLY closer (by more
+ * than the margin) actually preempts; roughly-equidistant threats keep
+ * the current fight going uninterrupted. Both the search radius
+ * (EntityFinder.findNearestHostile's own center) and this preemption
+ * comparison are anchored on the bot's own live position, matching every
+ * other findNearestHostile call site in this codebase
+ * (PlayerIntentionKillNode/TaskController) -- this was previously the
+ * one outlier searching/ranking around the defend target's position
+ * instead, which is the bug this docstring update corrects.
  */
 public final class PlayerIntentionDefendNode implements StateNode<PlayerIntentionState> {
+    // Centered on the bot's own position (see this class's own docstring
+    // for why -- matches every other EntityFinder.findNearestHostile call
+    // site in this codebase). Doubles as the max distance a threat may be
+    // from the defend target and still be worth engaging at all
+    // (withinDefendRange below) -- reused rather than a separate tunable
+    // per explicit direction, so "how far the bot looks for threats" and
+    // "how far it'll let a fight drift from the target before
+    // disengaging" stay the same distance.
     private static final double THREAT_SEARCH_RADIUS = CombatEngagement.SEARCH_RADIUS;
     // How much closer a new threat has to be than the current target
-    // (both measured from the defend target/anchor) to actually preempt
-    // it -- see this class's own docstring for why this exists at all.
+    // (both measured from the BOT, not the defend target/anchor -- see
+    // this class's own docstring) to actually preempt it.
     private static final double RETARGET_MARGIN = 0.5;
 
     private final PlayerIntention intention;
@@ -75,18 +108,34 @@ public final class PlayerIntentionDefendNode implements StateNode<PlayerIntentio
         }
 
         Entity currentThreat = currentTarget(ctx);
-        Entity nearestThreat = EntityFinder.findNearestHostile(ctx.level, anchor, THREAT_SEARCH_RADIUS);
+        // A threat that's drifted too far from the defend target is no
+        // longer worth chasing -- see this class's own docstring for why
+        // (leaving the defend target undefended to run down a distant
+        // hostile defeats the entire point of DEFEND). Dropped BEFORE
+        // retargeting below, so a currentThreat that just wandered out of
+        // range is treated exactly like "no current threat", not
+        // compared against nearestThreat at all.
+        if (currentThreat != null && !withinDefendRange(currentThreat, anchor)) {
+            currentThreat = null;
+            targetEntityId = -1;
+        }
+
+        Vec3 botPosition = ctx.player.position();
+        Entity nearestThreat = EntityFinder.findNearestHostile(ctx.level, botPosition, THREAT_SEARCH_RADIUS);
+        if (nearestThreat != null && !withinDefendRange(nearestThreat, anchor)) {
+            nearestThreat = null;
+        }
 
         if (currentThreat == null) {
             currentThreat = nearestThreat;
             targetEntityId = currentThreat != null ? currentThreat.getId() : -1;
         } else if (nearestThreat != null && nearestThreat != currentThreat) {
-            // Only preempt if nearestThreat is CLEARLY closer to the
-            // defend target than the one already being fought -- see
-            // this class's own docstring for why (avoids thrashing
-            // between two roughly-equidistant threats).
-            double currentDistance = currentThreat.position().distanceTo(anchor);
-            double nearestDistance = nearestThreat.position().distanceTo(anchor);
+            // Only preempt if nearestThreat is CLEARLY closer to the BOT
+            // than the one already being fought -- see this class's own
+            // docstring for why (avoids thrashing between two
+            // roughly-equidistant threats).
+            double currentDistance = currentThreat.position().distanceTo(botPosition);
+            double nearestDistance = nearestThreat.position().distanceTo(botPosition);
             if (nearestDistance + RETARGET_MARGIN < currentDistance) {
                 currentThreat = nearestThreat;
                 targetEntityId = currentThreat.getId();
@@ -116,6 +165,11 @@ public final class PlayerIntentionDefendNode implements StateNode<PlayerIntentio
     public void onExit(final TickContext ctx) {
         CombatEngagement.clear(ctx);
         targetEntityId = -1;
+    }
+
+    /** Whether `threat` is close enough to the defend target to be worth engaging at all -- see this class's own docstring for why a threat can be the closest one to the bot and still get rejected here (chasing it would mean abandoning the defend target). Reuses THREAT_SEARCH_RADIUS as the cutoff rather than a separate tunable -- see that constant's own comment. */
+    private static boolean withinDefendRange(final Entity threat, final Vec3 anchor) {
+        return threat.position().distanceTo(anchor) <= THREAT_SEARCH_RADIUS;
     }
 
     /** The live position to defend AND to stay near between fights -- the bot's own position for self-defend (defendTargetEntityId() == null), or the defend target's live position otherwise. Null if a real defend target was specified but is no longer resolvable (disconnected/despawned). */

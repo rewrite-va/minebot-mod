@@ -17,6 +17,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.phys.Vec3;
 
 import java.time.Instant;
 import java.time.ZoneId;
@@ -176,25 +177,42 @@ public final class StatusHud {
 
     /**
      * Formats one Blackboard value for display -- generic String.valueOf
-     * for everything except CombatEngagement.TARGET_ENTITY_ID, which gets
-     * the live entity's own readable name appended in parentheses (a
-     * player's real name via getScoreboardName() -- the same accessor
-     * MinebotMod's own broadcastEntityEvent already uses -- or a mob's
-     * registry type name otherwise) -- a bare numeric entity id on its
-     * own says nothing useful at a glance, per explicit request.
+     * for most values, with two exceptions: CombatEngagement.
+     * TARGET_ENTITY_ID gets the live entity's own readable name appended
+     * in parentheses (a player's real name via getScoreboardName() -- the
+     * same accessor MinebotMod's own broadcastEntityEvent already uses --
+     * or a mob's registry type name otherwise) -- a bare numeric entity id
+     * on its own says nothing useful at a glance, per explicit request;
+     * and any Vec3-shaped value (NAV_TARGET's own position, DEATH_POSITION)
+     * gets each coordinate trimmed to 1 decimal place -- Vec3's own
+     * toString()/a record's auto-generated one print full double
+     * precision (a dozen-plus meaningless digits), which is real noise on
+     * a HUD meant for an at-a-glance read, per explicit request ("trim
+     * positions to a 1 decimal place only").
      */
     private String formatBlackboardValue(final BlackboardKey<?> key) {
         Object value = blackboard.get(key);
-        if (key != CombatEngagement.TARGET_ENTITY_ID || !(value instanceof Integer entityId)) {
-            return String.valueOf(value);
+        if (key == CombatEngagement.TARGET_ENTITY_ID && value instanceof Integer entityId) {
+            ClientLevel level = Minecraft.getInstance().level;
+            Entity entity = level != null ? level.getEntity(entityId) : null;
+            if (entity == null) {
+                return String.valueOf(entityId);
+            }
+            String name = entity instanceof Player player ? player.getScoreboardName() : BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString();
+            return entityId + " (" + name + ")";
         }
-        ClientLevel level = Minecraft.getInstance().level;
-        Entity entity = level != null ? level.getEntity(entityId) : null;
-        if (entity == null) {
-            return String.valueOf(entityId);
+        if (value instanceof Vec3 position) {
+            return formatPosition(position);
         }
-        String name = entity instanceof Player player ? player.getScoreboardName() : BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString();
-        return entityId + " (" + name + ")";
+        if (value instanceof NavIntent.Target target) {
+            return formatPosition(target.position()) + " (stop=" + target.stopDistance() + ")";
+        }
+        return String.valueOf(value);
+    }
+
+    /** Each coordinate rounded to 1 decimal place -- see formatBlackboardValue's own docstring for why. */
+    private static String formatPosition(final Vec3 position) {
+        return String.format("(%.1f, %.1f, %.1f)", position.x(), position.y(), position.z());
     }
 
     /**

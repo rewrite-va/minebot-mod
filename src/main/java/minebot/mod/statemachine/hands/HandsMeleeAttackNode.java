@@ -1,8 +1,7 @@
 package minebot.mod.statemachine.hands;
 
-import minebot.mod.InventoryActions;
+import minebot.mod.InventoryController;
 import minebot.mod.MinebotMod;
-import minebot.mod.WeaponSelector;
 import minebot.mod.statemachine.StateNode;
 import minebot.mod.statemachine.TickContext;
 import minebot.mod.statemachine.playerintention.CombatEngagement;
@@ -13,7 +12,7 @@ import net.minecraft.world.entity.Entity;
 /**
  * Swings at CombatEngagement's live target (whichever PlayerIntention:KILL/
  * DEFEND fight is currently active) with whatever real melee weapon
- * WeaponSelector picked -- ported from the old shared tickAttack's melee
+ * InventoryController picked -- ported from the old shared tickAttack's melee
  * branch (see git history: MinebotMod.tickAttack's `else` case,
  * `gameMode.attack(player, target)` + `player.swing(...)`). Only active
  * when HandsStateMachine's own entry edge finds SELECTED_WEAPON is NOT a
@@ -69,12 +68,12 @@ public final class HandsMeleeAttackNode implements StateNode<HandsState> {
         // independently re-computed here) -- by the time this node is
         // even active, HandsStateMachine's own entry edge has already
         // confirmed it isn't a bow.
-        WeaponSelector.Choice weapon = ctx.blackboard.get(CombatEngagement.SELECTED_WEAPON);
+        InventoryController.Choice weapon = ctx.blackboard.get(CombatEngagement.SELECTED_WEAPON);
         if (weapon != null) {
             // moveToHotbar is already a no-op if this slot is already
             // selected/already in the hotbar -- safe to call every tick
             // unconditionally, same as HandsEatNode's own food-swap call.
-            InventoryActions.moveToHotbar(ctx.player, weapon.slot(), 8);
+            InventoryController.moveToHotbar(ctx.player, weapon.slot(), 8);
         }
         // weapon == null means nothing beats bare hands -- still a real,
         // if weak, attack (vanilla lets an empty main hand swing too), so

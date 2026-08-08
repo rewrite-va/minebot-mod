@@ -26,6 +26,7 @@ import minebot.mod.statemachine.head.HeadStateMachine;
 import minebot.mod.statemachine.legs.LegsNavigateNode;
 import minebot.mod.statemachine.legs.LegsState;
 import minebot.mod.statemachine.legs.LegsStateMachine;
+import minebot.mod.task.TaskController;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import org.slf4j.Logger;
@@ -97,7 +98,6 @@ public final class MinebotMod implements ClientModInitializer {
     private final Set<Integer> knownPlayerIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final InventoryReporter inventoryReporter = new InventoryReporter();
     private final ItemDropTracker itemDropTracker = new ItemDropTracker();
-    private final AutoEquipArmor autoEquipArmor = new AutoEquipArmor();
     // The peer-state-machine architecture described in STATE_MACHINE.md.
     // CommandBus is how a typed Command (see its own docstring) crosses
     // from dispatchMessage (WebSocket thread) to state machine edge
@@ -130,9 +130,14 @@ public final class MinebotMod implements ClientModInitializer {
     // class can also hold the reference for PathVisualizer -- see
     // LegsStateMachine.create's own docstring.
     private final LegsNavigateNode legsNavigateNode = new LegsNavigateNode();
-    private final StateMachine<LegsState> legsStateMachine = LegsStateMachine.create(legsNavigateNode, playerIntentionStateMachine);
+    private final StateMachine<LegsState> legsStateMachine = LegsStateMachine.create(legsNavigateNode);
     private final StateMachine<HeadState> headStateMachine = HeadStateMachine.create(legsStateMachine, playerIntentionStateMachine);
     private final StateMachine<HandsState> handsStateMachine = HandsStateMachine.create(playerIntentionStateMachine, legsStateMachine);
+    // The generic Task queue described in prompt.txt/TaskController's own
+    // docstring -- ticked directly, outside every peer StateMachine, same
+    // precedent DeathWatcher/InventoryController's own tick() already
+    // established. !give is its first real Task (GiveTask).
+    private final TaskController taskController = new TaskController(playerIntentionStateMachine);
     private ControlClient controlClient;
     private float lastReportedHealth = -1;
 
@@ -236,6 +241,12 @@ public final class MinebotMod implements ClientModInitializer {
         // evaluates its edges below (see DeathWatcher's own docstring).
         deathWatcher.tick(ctx);
         playerIntentionStateMachine.tick(ctx);
+        // After PlayerIntention (isBusy() reads its just-published DEFEND
+        // state this same tick) but before Legs (a task's own published
+        // NAV_TARGET must already be visible by the time Legs evaluates
+        // its own edges below -- same reasoning deathWatcher.tick's own
+        // placement above documents for DEATH_POSITION).
+        taskController.tick(ctx);
         legsStateMachine.tick(ctx);
         headStateMachine.tick(ctx);
         handsStateMachine.tick(ctx);
@@ -243,8 +254,12 @@ public final class MinebotMod implements ClientModInitializer {
         // Always-on, independent of every StateMachine above -- see its
         // own docstring for why this doesn't need a state of its own
         // (a single-tick container click, no multi-tick behavior to
-        // coordinate with Legs/Head/PlayerIntention at all).
-        autoEquipArmor.tick(player);
+        // coordinate with Legs/Head/PlayerIntention at all). Also backs
+        // InventoryController.lastPickedUpItem() (bare "!give" with no
+        // item argument) -- a pickup landing the same tick a fresh !give
+        // arrives is visible to GiveTask.onEnter only next tick, the same
+        // one-tick lag every other Blackboard-published fact already has.
+        InventoryController.tick(player);
 
         maybeBroadcastPositionEvent(player);
         broadcastEntityEvents(player, level);
@@ -287,21 +302,29 @@ public final class MinebotMod implements ClientModInitializer {
     }
 
     /**
-     * Deliberately stripped down to only "follow"/"stop"/"kill"/"defend"
-     * -- see STATE_MACHINE.md and the conversation that produced this:
-     * every other command (goto/give/dig_down/collect/chat/
+     * Deliberately stripped down to only "follow"/"stop"/"kill"/"defend"/
+     * "pickup"/"give"/"chat" -- see STATE_MACHINE.md and the conversation
+     * that produced this: every other command (goto/dig_down/collect/
      * move_to_hotbar/equip/drop/find/find_chest/query/debug_swap_test)
      * was removed along with the ControlState.Mode-driven machinery and
      * standalone classes that only existed to support them, rather than
      * carrying old, not-yet-migrated behavior alongside the new peer
      * state-machine architecture. Each command gets reintroduced, one at
-     * a time, once it's genuinely backed by a real SM node -- see git
+     * a time, once it's genuinely backed by a real SM node or Task (or,
+     * for "chat", confirmed to genuinely need none at all) -- see git
      * history for the removed implementations if reintroducing one.
-     * "kill" was the first one reintroduced this way (PlayerIntention:KILL --
-     * originally named COMBAT, renamed once "defend" needed the exact
-     * same fighting mechanics with different re-entry semantics -- see
-     * CombatEngagement's own docstring); "defend" is PlayerIntention:DEFEND +
-     * the same Hands:MELEE_ATTACK/DRAW_BOW + Head:AIM_AT_TARGET.
+     * "kill" was the first one reintroduced this way (PlayerIntention:
+     * KILL -- originally named COMBAT, renamed once "defend" needed the
+     * exact same fighting mechanics with different re-entry semantics --
+     * see CombatEngagement's own docstring); "defend" is PlayerIntention:
+     * DEFEND + the same Hands:MELEE_ATTACK/DRAW_BOW + Head:AIM_AT_TARGET;
+     * "pickup" is Legs:PICKUP_ITEMS (see Command.Pickup's own docstring);
+     * "give" is TaskController's own GiveTask (see its own docstring for
+     * why give is a queued Task rather than another peer-SM axis, unlike
+     * every other command here); "chat" is the one exception with no SM
+     * node/Task behind it at all -- a real vanilla chat send is an
+     * instant, stateless side effect (see its own case's docstring below
+     * for why), never displaced by re-entering it.
      *
      * Also updates playerIntention here, alongside publishing the
      * Command itself, for "follow"/"stop"/"defend" -- this is the one
@@ -310,9 +333,10 @@ public final class MinebotMod implements ClientModInitializer {
      * PlayerIntention's own docstring for why that's tracked separately
      * from Command/CommandBus: Command is a one-tick signal an edge
      * reacts to once, intention is a standing fact that survives across
-     * many ticks/interruptions). "kill" deliberately does NOT touch
-     * playerIntention -- it's a one-shot trigger, not a standing goal
-     * (see PlayerIntention/PlayerIntentionKillNode's own docstrings).
+     * many ticks/interruptions). "kill"/"pickup"/"give" deliberately do NOT
+     * touch playerIntention -- all three are one-shot triggers, not
+     * standing goals (see PlayerIntention/PlayerIntentionKillNode/
+     * Command.Pickup/Command.Give's own docstrings).
      */
     private void dispatchMessage(final String type, final JsonObject json) {
         switch (type) {
@@ -345,6 +369,58 @@ public final class MinebotMod implements ClientModInitializer {
                 Integer defendTargetEntityId = json.has("entity_id") && !json.get("entity_id").isJsonNull() ? json.get("entity_id").getAsInt() : null;
                 playerIntention.defend(defendTargetEntityId);
                 commandBus.publish(new Command.Defend(defendTargetEntityId));
+            }
+            case "pickup" -> {
+                // Deliberately does NOT touch playerIntention -- like
+                // "kill", this is a one-shot Legs-only reaction (see
+                // Command.Pickup/LegsPickupItemsNode's own docstrings for
+                // why item-recovery is purely a navigation concern, never
+                // a PlayerIntentionState).
+                commandBus.publish(new Command.Pickup());
+            }
+            case "give" -> {
+                // Every field optional, per prompt.txt's own !give design:
+                // absent/null "recipient_entity_id" means "give to the
+                // caller" (drop at the bot's own feet); absent/null "item"
+                // means "the last item picked up"; absent/zero "quantity"
+                // means "the whole stack" -- see Command.Give/GiveTask's
+                // own docstrings for exactly how each is resolved.
+                // Deliberately does NOT touch playerIntention -- like
+                // pickup/kill, this is a one-shot task, not a standing
+                // goal, and isn't even a peer-SM concern at all (see
+                // TaskController's own docstring for why give is
+                // task-queue-driven instead).
+                Integer recipientEntityId = json.has("recipient_entity_id") && !json.get("recipient_entity_id").isJsonNull() ? json.get("recipient_entity_id").getAsInt() : null;
+                String item = json.has("item") && !json.get("item").isJsonNull() ? json.get("item").getAsString() : null;
+                int quantity = json.has("quantity") && !json.get("quantity").isJsonNull() ? json.get("quantity").getAsInt() : 0;
+                commandBus.publish(new Command.Give(recipientEntityId, item, quantity));
+            }
+            case "chat" -> {
+                // Re-added -- was one of the commands stripped down to
+                // nothing during the peer-state-machine rewrite (see this
+                // method's own docstring), but never actually needed a
+                // real SM node behind it the way follow/kill/defend/pickup
+                // did: this is a genuine vanilla chat SEND (real
+                // ClientboundChat-triggering packet via the player's own
+                // connection, visible to every other player, not just a
+                // local-only broadcast), same mechanism a human typing in
+                // chat uses. Confirmed live this gap meant every one of
+                // Python's own chat replies (!follow's "ok, following X",
+                // inventory-gain announcements, "I died", ...) arrived
+                // back at the mod over the wire but was never actually
+                // displayed anywhere a human could see -- reported live as
+                // "the bot do not send any message in chat" -- since
+                // dispatchMessage's switch had no case for "chat" at all
+                // (each wire << {"type": "chat", ...} instead fell through
+                // to the unknown-command-type warning). Not routed through
+                // CommandBus/any StateMachine at all -- sending a chat
+                // message is an instant, one-shot side effect with no
+                // ongoing state, the same reasoning PlayerIntentionDeadNode's
+                // own docstring gives for DEAD's direct respawn() call.
+                Minecraft client = Minecraft.getInstance();
+                if (client.player != null && json.has("text")) {
+                    client.player.connection.sendChat(json.get("text").getAsString());
+                }
             }
             default -> LOGGER.warn("control channel: unknown command type '{}'", type);
         }

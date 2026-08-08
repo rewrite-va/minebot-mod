@@ -28,21 +28,26 @@ package minebot.mod.statemachine.hands;
  * stops holding -- Hands never needs to remember what it was doing
  * before EAT interrupted it.
  *
- * MELEE_ATTACK/DRAW_BOW are mutually exclusive, both reachable whenever
- * PlayerIntention==KILL or PlayerIntention==DEFEND (either real fighting
- * state -- see PlayerIntentionState's own docstring), split by
- * CombatEngagement.SELECTED_WEAPON's own kind (see HandsStateMachine's
- * own docstring for the exact entry conditions) -- PlayerIntention/Legs
- * already decided range/positioning per weapon (see CombatEngagement's
- * own docstring for its
+ * MELEE_ATTACK/DRAW_BOW/DRAW_CROSSBOW are mutually exclusive, all
+ * reachable whenever PlayerIntention==KILL or PlayerIntention==DEFEND
+ * (either real fighting state -- see PlayerIntentionState's own
+ * docstring), split by CombatEngagement.SELECTED_WEAPON's own kind (see
+ * HandsStateMachine's own docstring for the exact entry conditions) --
+ * PlayerIntention/Legs already decided range/positioning per weapon (see
+ * CombatEngagement's own docstring for its
  * kiting logic), Hands here just acts once positioned: MELEE_ATTACK
- * swings with whatever WeaponSelector picked once within melee range
+ * swings with whatever InventoryController picked once within melee range
  * (its published NAV_ARRIVED), ported from the old shared
  * tickAttack's melee branch. DRAW_BOW draws and fires a real bow once it
  * has actual line of sight to the target (see its own docstring) -- NOT
  * range-gated the way MELEE_ATTACK is, since a bow's whole point is
  * acting from range; ported from the deleted BowShooter class (git
  * history has its full docstring on the real mechanics involved).
+ * DRAW_CROSSBOW is the crossbow counterpart (see HandsDrawCrossbowNode's
+ * own docstring for why it's a genuinely separate state rather than
+ * folded into DRAW_BOW -- a crossbow's real charge/fire mechanics are
+ * shaped nothing like a bow's hold-and-auto-release), same
+ * line-of-sight-only gating, no range gate either.
  *
  * More states (mining, ...) get added later, per STATE_MACHINE.md's
  * "Implementation order".
@@ -52,5 +57,6 @@ public enum HandsState {
     OPEN_DOOR,
     EAT,
     MELEE_ATTACK,
-    DRAW_BOW
+    DRAW_BOW,
+    DRAW_CROSSBOW
 }
