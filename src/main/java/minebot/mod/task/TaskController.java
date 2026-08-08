@@ -1,11 +1,13 @@
 package minebot.mod.task;
 
 import minebot.mod.EntityFinder;
+import minebot.mod.MinebotMod;
 import minebot.mod.statemachine.Command;
 import minebot.mod.statemachine.StateMachine;
 import minebot.mod.statemachine.TickContext;
 import minebot.mod.statemachine.playerintention.CombatEngagement;
 import minebot.mod.statemachine.playerintention.PlayerIntentionState;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.entity.Entity;
 
 import java.util.ArrayDeque;
@@ -32,25 +34,31 @@ import java.util.function.Consumer;
  * the full contrast with StateNode).
  *
  * Only one Task is ever "current" at a time -- a fresh Task is dequeued
- * only once the current one finishes (isFinished()) AND isBusy() says the
- * bot isn't otherwise occupied (see tick()'s own dequeue check). Nothing
- * here preempts an in-progress Task the way e.g. KILL preempts
+ * only once the current one finishes (isFinished()) AND busyThreat() says
+ * the bot isn't otherwise occupied (see tick()'s own dequeue check).
+ * Nothing here preempts an in-progress Task the way e.g. KILL preempts
  * PlayerIntention -- per prompt.txt's own design, a Task, once current,
  * runs to completion before anything else is dequeued.
  *
  * `busyReporter` sends one real chat line the first tick a freshly-
- * enqueued task can't actually start (isBusy() holds) -- added after a
- * live !sleep sat silently queued behind an active DEFEND-with-nearby-
- * hostile: Python's own immediate "ok, looking for a bed" reply is sent
- * at dispatch time, before this class has any chance to know whether the
- * task can actually run, so it can't reflect this on its own. A real
- * chat send (not a wire event Python would need to relay) since this is
- * closer to vanilla's own in-game system messages -- the same reasoning
- * SleepTask's own docstring gives for leaning on real sleep-rejection
- * messages instead of inventing a Python-side signal. Deliberately fires
- * only ONCE per stuck task (see reportedBusyForFront below), not every
- * tick it stays queued -- isBusy() can hold for a long, ongoing fight;
- * repeating the same line every tick would spam chat the whole time.
+ * enqueued task can't actually start (busyThreat() returns non-null) --
+ * added after a live !sleep sat silently queued behind an active DEFEND-
+ * with-nearby-hostile: Python's own immediate "ok, looking for a bed"
+ * reply is sent at dispatch time, before this class has any chance to
+ * know whether the task can actually run, so it can't reflect this on
+ * its own. A real chat send (not a wire event Python would need to
+ * relay) since this is closer to vanilla's own in-game system messages --
+ * the same reasoning SleepTask's own docstring gives for leaning on real
+ * sleep-rejection messages instead of inventing a Python-side signal.
+ * Deliberately fires only ONCE per stuck task (see reportedBusyForFront
+ * below), not every tick it stays queued -- busyThreat() can hold for a
+ * long, ongoing fight; repeating the same line every tick would spam
+ * chat the whole time. Names WHAT the threat is and how far away (see
+ * describeThreat()) -- added after a live report of "it works but what
+ * threat? I see nothing": findNearestHostile has no line-of-sight check
+ * and a 32-block radius, so the blocking hostile is very often not
+ * anywhere near visible on screen, and a bare "a nearby threat" gave no
+ * way to check that against reality.
  */
 public final class TaskController {
     // How close a hostile has to be, while DEFEND is the live PlayerIntention
@@ -112,10 +120,13 @@ public final class TaskController {
         if (queue.isEmpty()) {
             return;
         }
-        if (isBusy(ctx)) {
+        Entity blockingThreat = busyThreat(ctx);
+        if (blockingThreat != null) {
             if (!reportedBusyForFront) {
                 reportedBusyForFront = true;
-                busyReporter.accept("busy defending against a nearby threat -- queued task will run once that's clear");
+                String description = describeThreat(ctx, blockingThreat);
+                MinebotMod.LOGGER.info("task queue: held off dequeuing, busy -- {}", description);
+                busyReporter.accept("busy defending against " + description + " -- queued task will run once that's clear");
             }
             return;
         }
@@ -125,19 +136,39 @@ public final class TaskController {
     }
 
     /**
-     * True if the player is busy with something outside the task system
-     * that a Task shouldn't interrupt -- currently: real DEFEND combat, a
+     * The hostile currently making the player "busy" (see this method's
+     * own name/return-null-if-not-busy shape), or null if nothing's
+     * holding the queue off right now -- currently: real DEFEND combat, a
      * hostile actually nearby (per explicit direction: "returns true if
      * there are monsters nearby and we are in defend mode"). Standing in
      * DEFEND with nothing actually threatening nearby is NOT busy -- a
      * queued give should still run rather than waiting on a defend mode
      * that has nothing to do right now.
+     *
+     * Returns the real Entity (not just a boolean) so tick() can report
+     * WHAT it found and HOW FAR away, not just "something" -- added after
+     * a live report of "it works but what threat? I see nothing": this
+     * uses EntityFinder.findNearestHostile, which (unlike
+     * findNearestVisibleHostile, DEFEND's own actual combat-targeting
+     * scan) has no line-of-sight check at all, and BUSY_THREAT_RADIUS is
+     * 32 blocks -- a hostile well behind a wall, underground, or just far
+     * across open terrain can hold the queue off with nothing visibly
+     * wrong on screen. That's intentional (per the same explicit
+     * direction: a real threat should still block a queued give/sleep
+     * even if the bot hasn't turned to look at it yet), but it needs to
+     * be a diagnosable "why" instead of a silent one.
      */
-    private boolean isBusy(final TickContext ctx) {
+    private Entity busyThreat(final TickContext ctx) {
         if (ctx.blackboard.get(playerIntentionStateMachine) != PlayerIntentionState.DEFEND) {
-            return false;
+            return null;
         }
-        Entity nearestHostile = EntityFinder.findNearestHostile(ctx.level, ctx.player.position(), BUSY_THREAT_RADIUS);
-        return nearestHostile != null;
+        return EntityFinder.findNearestHostile(ctx.level, ctx.player.position(), BUSY_THREAT_RADIUS);
+    }
+
+    /** "a zombie 18 blocks away" -- mob registry type name (matching EntityFinder.findNearestEntity's own type-string shape) plus real distance rounded to the nearest block, so the busy report/log line says something a player looking at their own surroundings can actually check against. */
+    private static String describeThreat(final TickContext ctx, final Entity threat) {
+        String type = BuiltInRegistries.ENTITY_TYPE.getKey(threat.getType()).getPath();
+        long distance = Math.round(ctx.player.position().distanceTo(threat.position()));
+        return "a " + type + " " + distance + " blocks away";
     }
 }
