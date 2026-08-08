@@ -418,10 +418,10 @@ public final class MinebotMod implements ClientModInitializer {
             case "sleep" -> {
                 // No data at all -- "nearest bed" is the only meaningful
                 // target (see Command.Sleep's own docstring). Deliberately
-                // does NOT touch playerIntention -- like kill/pickup/give,
-                // this is a one-shot trigger, not a standing goal (see
-                // PlayerIntentionState's own docstring for why SLEEP isn't
-                // a PlayerIntention value at all).
+                // does NOT touch playerIntention -- read by TaskController.
+                // tick() to enqueue a fresh SleepTask, the same queued-Task
+                // shape "give" already uses, not a peer-SM concern at all
+                // (see task/SleepTask's own docstring for why).
                 commandBus.publish(new Command.Sleep());
             }
             case "chat" -> {

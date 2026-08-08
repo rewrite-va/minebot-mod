@@ -41,7 +41,7 @@ public sealed interface Command {
     record Give(Integer recipientEntityId, String item, int quantity) implements Command {
     }
 
-    /** !sleep -- walk to the nearest bed and sleep in it. A one-shot TRIGGER, same shape as Kill/Pickup (see PlayerIntentionSleepNode's own docstring for why this isn't a standing PlayerIntention value either) -- deliberately carries no data, there's nothing to parameterize (unlike Kill's optional query): "nearest bed" is the only meaningful target, resolved entirely client-side via BlockFinder since Python has no block-scanning of its own. */
+    /** !sleep -- walk to the nearest bed and sleep in it. Read by TaskController.tick() to enqueue a fresh SleepTask, the same queued-Task shape Give uses (not a peer StateMachine concern at all -- see task/SleepTask's own docstring for why this isn't a PlayerIntentionState the way Kill is). Deliberately carries no data, there's nothing to parameterize: "nearest bed" is the only meaningful target, resolved entirely client-side via BlockFinder since Python has no block-scanning of its own. */
     record Sleep() implements Command {
     }
 }

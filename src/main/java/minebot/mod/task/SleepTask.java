@@ -1,8 +1,8 @@
-package minebot.mod.statemachine.playerintention;
+package minebot.mod.task;
 
 import minebot.mod.pathfinding.BlockFinder;
-import minebot.mod.statemachine.StateNode;
 import minebot.mod.statemachine.TickContext;
+import minebot.mod.statemachine.playerintention.NavIntent;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -13,42 +13,40 @@ import net.minecraft.world.phys.Vec3;
 
 /**
  * !sleep -- finds the nearest bed (BlockFinder.findNearestBed, the first
- * real block-scan helper in the mod, built for exactly this), walks to
- * it (publishing NavIntent.NAV_TARGET/NAV_ARRIVED the same way every
- * other PlayerIntention node does -- Legs/Head are pure consumers, same
- * split PlayerIntentionFollowNode/PlayerIntentionKillNode already
- * established), then right-clicks it once in range, the same real
- * useItemOn interaction HandsOpenDoorNode uses for doors -- ported
- * inline here rather than as a separate Hands node, since (unlike
- * OPEN_DOOR, which can fire repeatedly for many different doors along a
- * walk) this is a single one-shot action tied 1:1 to this node's own
- * bed target and lifecycle, not an ongoing per-tick condition Hands would
- * need to keep re-evaluating independently.
+ * real block-scan helper in the mod, built for exactly this), walks to it
+ * (publishing NavIntent.NAV_TARGET/NAV_ARRIVED the same shared channel
+ * GiveTask already uses -- Legs is a pure consumer, no awareness a Task
+ * rather than a peer SM is asking), then right-clicks it once in range,
+ * the same real useItemOn interaction HandsOpenDoorNode uses for doors.
  *
- * SLEEP is a one-shot TRIGGER, not a standing PlayerIntention value --
- * same reasoning as KILL (see PlayerIntentionState's own docstring):
- * "walk to a bed and sleep" is a task that finishes (bed reached and
- * used, or gives up) on its own, not an ongoing goal the player is
- * describing. Modeled directly on PlayerIntentionKillNode's own
- * onEnter/onTick/isFinished shape.
+ * A queued Task, not a PlayerIntentionState -- an earlier version made
+ * this a peer-SM state (PlayerIntentionState.SLEEP, modeled on KILL's
+ * one-shot-trigger shape), removed per explicit direction ("I dont like
+ * playerintention:sleep... implement it more like !give, which is a task
+ * in a queue"): "walk to a bed and sleep" is a queued unit of work with a
+ * genuine start/finish, exactly Task's own docstring description of the
+ * GiveTask/StateNode distinction -- it never needs to interrupt or be
+ * resumed by IDLE/FOLLOW/DEFEND the way a real standing intention would,
+ * it just runs once queued and is done. TaskController.isBusy() already
+ * holds off dequeuing it during real DEFEND combat, the same protection
+ * SLEEP's old KILL-interrupt edges existed to provide.
  *
  * isFinished() once the actual useItemOn call resolves (whether or not
  * vanilla accepted it -- a bed can reject sleep for real in-game reasons
  * a client-side mod can't fully predict ahead of time: it's daytime, a
  * monster is nearby, the bed's obstructed, this isn't the bot's actual
- * spawn-eligible bed, etc. -- see onTick's own comment), or once no bed
- * can be found/reached at all within TIMEOUT_TICKS. Deliberately does
- * NOT try to verify the bot ended up actually asleep (Player.isSleeping())
+ * spawn-eligible bed, etc. -- see tick()'s own comment), or once no bed
+ * can be found/reached at all within TIMEOUT_TICKS. Deliberately does NOT
+ * try to verify the bot ended up actually asleep (Player.isSleeping())
  * before finishing -- vanilla's own sleep failure is communicated back to
  * the player via a real chat system message the same way a human's
  * failed sleep attempt would be, which the bot already relays like any
  * other chat line (see MinebotMod's own chat-event broadcast), so there's
- * no separate success/failure signal this node needs to invent.
+ * no separate success/failure signal this task needs to invent.
  */
-public final class PlayerIntentionSleepNode implements StateNode<PlayerIntentionState> {
-    // Matches PlayerIntentionKillNode/EntityFinder's own general search
-    // scope -- "nearest bed" should mean "reasonably nearby", not a
-    // world-wide scan.
+public final class SleepTask implements Task {
+    // Matches EntityFinder's own general search scope -- "nearest bed"
+    // should mean "reasonably nearby", not a world-wide scan.
     private static final double SEARCH_RADIUS = 32.0;
     // Matches HandsOpenDoorNode's own INTERACT_RANGE -- a real player's
     // short interaction reach. Used directly as NAV_TARGET's own
@@ -67,25 +65,31 @@ public final class PlayerIntentionSleepNode implements StateNode<PlayerIntention
     private BlockPos bedPos;
     private boolean finished;
     private int ticksElapsed;
+    private boolean started;
 
     @Override
-    public void onEnter(final TickContext ctx, final PlayerIntentionState previousState) {
-        finished = false;
-        ticksElapsed = 0;
+    public void onEnter(final TickContext ctx) {
         bedPos = BlockFinder.findNearestBed(ctx.level, ctx.player.position(), SEARCH_RADIUS);
-        publishOrFinish(ctx);
+        tick(ctx);
     }
 
     @Override
-    public void onTick(final TickContext ctx) {
-        ticksElapsed++;
-        publishOrFinish(ctx);
-    }
+    public void tick(final TickContext ctx) {
+        if (finished) {
+            return;
+        }
+        // onEnter already calls tick() once (same convention GiveTask
+        // uses) -- only count ticks from the SECOND call onward, so a
+        // fresh task doesn't burn a tick off TIMEOUT_TICKS before it's
+        // had a real tick of its own (same reasoning
+        // LegsPickupItemsNode's own docstring gives for not delegating
+        // its onEnter straight to onTick).
+        if (started) {
+            ticksElapsed++;
+        }
+        started = true;
 
-    private void publishOrFinish(final TickContext ctx) {
         if (bedPos == null) {
-            ctx.blackboard.put(NavIntent.NAV_TARGET, null);
-            ctx.blackboard.put(NavIntent.NAV_ARRIVED, true);
             finished = true;
             return;
         }
@@ -121,8 +125,6 @@ public final class PlayerIntentionSleepNode implements StateNode<PlayerIntention
     public void onExit(final TickContext ctx) {
         ctx.blackboard.put(NavIntent.NAV_TARGET, null);
         ctx.blackboard.put(NavIntent.NAV_ARRIVED, true);
-        bedPos = null;
-        ticksElapsed = 0;
     }
 
     @Override

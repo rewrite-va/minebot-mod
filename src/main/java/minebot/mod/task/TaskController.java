@@ -17,7 +17,12 @@ import java.util.Deque;
  * "a cross-cutting concern that isn't itself a graph of states") FIFO
  * queue of one-shot Task work -- see prompt.txt/the conversation that
  * produced this for the full design. !give is the first real Task
- * (GiveTask); this class itself has no give-specific knowledge at all.
+ * (GiveTask); !sleep (SleepTask) is the second -- moved here from an
+ * earlier PlayerIntentionState.SLEEP peer-SM node per explicit direction
+ * ("implement it more like !give, which is a task in a queue"), since
+ * "walk to a bed and sleep" is exactly the queued-unit-of-work shape a
+ * Task already exists for, not a standing intention. This class itself
+ * has no give/sleep-specific knowledge at all.
  *
  * Deliberately NOT a peer StateMachine<S>: a Task has no "which state am I
  * in" concept, no Edge table, no notion of ever being re-entered once
@@ -53,11 +58,14 @@ public final class TaskController {
         queue.add(task);
     }
 
-    /** Call once per client tick. First enqueues a fresh GiveTask for every Command.Give seen this tick (the cross-thread handoff CommandBus exists for -- see Command.Give's own docstring), then ticks the current task if there is one (retiring it via onExit the moment it reports isFinished()), otherwise dequeues a fresh one if canDequeueTask() allows it. */
+    /** Call once per client tick. First enqueues a fresh GiveTask/SleepTask for every Command.Give/Command.Sleep seen this tick (the cross-thread handoff CommandBus exists for -- see Command.Give/Command.Sleep's own docstrings), then ticks the current task if there is one (retiring it via onExit the moment it reports isFinished()), otherwise dequeues a fresh one if canDequeueTask() allows it. */
     public void tick(final TickContext ctx) {
         for (Command command : ctx.commands) {
             if (command instanceof Command.Give give) {
                 enqueue(new GiveTask(give.recipientEntityId(), give.item(), give.quantity()));
+            }
+            if (command instanceof Command.Sleep) {
+                enqueue(new SleepTask());
             }
         }
 

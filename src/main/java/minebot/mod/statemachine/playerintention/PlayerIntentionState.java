@@ -49,12 +49,15 @@ package minebot.mod.statemachine.playerintention;
  * !kill re-target while already fighting, but nothing auto-re-engages
  * once a kill finishes.
  *
- * SLEEP (!sleep) is the same one-shot-TRIGGER shape as KILL, not a
- * standing PlayerIntention value -- walking to a bed and sleeping in it
- * is a task that finishes (or gives up) on its own, exactly like a kill
- * finishes once its target dies, so it resumes straight back to
- * intention's current state the same way (see PlayerIntentionSleepNode's
- * own docstring). Reachable from IDLE/FOLLOW/DEFEND, same as KILL.
+ * SLEEP (!sleep) is deliberately NOT on this axis at all -- an earlier
+ * version had it here as a one-shot trigger mirroring KILL's shape
+ * (walk to a bed, sleep, resume whatever intention already said), removed
+ * per explicit direction ("implement it more like !give, which is a task
+ * in a queue"): "walk to a bed and sleep" has no need to ever interrupt
+ * or be resumed by IDLE/FOLLOW/DEFEND the way a real fight does, it's
+ * just a queued unit of work. See task/SleepTask's own docstring -- it
+ * lives in TaskController's queue instead, the same home !give's
+ * GiveTask already established.
  *
  * DEFEND (!defend), unlike KILL, IS a real standing PlayerIntention value
  * -- "protect this entity from hostiles" (or the bot itself, if no
@@ -95,6 +98,5 @@ public enum PlayerIntentionState {
     IDLE,
     FOLLOW,
     DEFEND,
-    KILL,
-    SLEEP
+    KILL
 }
