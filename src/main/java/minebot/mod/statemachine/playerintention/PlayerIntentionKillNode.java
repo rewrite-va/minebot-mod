@@ -87,17 +87,26 @@ public final class PlayerIntentionKillNode implements StateNode<PlayerIntentionS
         return finished;
     }
 
-    /** query == null means "nearest hostile mob" (EntityFinder.findNearestHostile); a real query string means "nearest entity of that exact registry type" (EntityFinder.findNearestEntity), prefixed with "minecraft:" if the query has no namespace of its own -- same shape the old (pre-deletion) !attack command's resolveNearestEntityOnly used. Reads the LAST Command.Kill in ctx.commands this tick (there should only ever be one -- CommandBus.drain() is called once per tick -- but last-wins is a harmless, simple tiebreak if that ever changes). No Command.Kill present at all (defensive only -- can't happen given this only ever runs from an edge that itself required one) falls back to "nearest hostile". */
+    /** entityId, when present, is a player already resolved Python-side (EntityTracker, same as !defend) -- looked up directly via ctx.level.getEntity, no EntityFinder scan needed, and takes priority over query. Otherwise query == null means "nearest hostile mob" (EntityFinder.findNearestHostile); a real query string means "nearest entity of that exact registry type" (EntityFinder.findNearestEntity), prefixed with "minecraft:" if the query has no namespace of its own -- same shape the old (pre-deletion) !attack command's resolveNearestEntityOnly used. Reads the LAST Command.Kill in ctx.commands this tick (there should only ever be one -- CommandBus.drain() is called once per tick -- but last-wins is a harmless, simple tiebreak if that ever changes). No Command.Kill present at all (defensive only -- can't happen given this only ever runs from an edge that itself required one) falls back to "nearest hostile". */
     private static Entity resolveTarget(final TickContext ctx) {
+        Integer entityId = null;
         String query = null;
         boolean found = false;
         for (Command command : ctx.commands) {
             if (command instanceof Command.Kill kill) {
+                entityId = kill.entityId();
                 query = kill.query();
                 found = true;
             }
         }
-        if (!found || query == null || query.isBlank()) {
+        if (!found) {
+            return EntityFinder.findNearestHostile(ctx.level, ctx.player.position(), CombatEngagement.SEARCH_RADIUS);
+        }
+        if (entityId != null) {
+            Entity target = ctx.level.getEntity(entityId);
+            return target != null && !target.isRemoved() ? target : null;
+        }
+        if (query == null || query.isBlank()) {
             return EntityFinder.findNearestHostile(ctx.level, ctx.player.position(), CombatEngagement.SEARCH_RADIUS);
         }
         String registryId = query.contains(":") ? query : "minecraft:" + query;

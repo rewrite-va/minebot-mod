@@ -24,8 +24,8 @@ public sealed interface Command {
     record Stop() implements Command {
     }
 
-    /** !kill [query] -- fight a target. `query` is a raw entity-type string ("zombie") resolved client-side (mirrors the deleted EntityFinder's old shape -- Python has no non-player entity tracking to resolve this itself, unlike Follow's player-name lookup), or null for "nearest hostile mob". */
-    record Kill(String query) implements Command {
+    /** !kill [query] -- fight a target. `entityId`, when present (non-null), is a player entity id already resolved Python-side via EntityTracker (same Follow-style name->id lookup !defend uses) and takes priority over `query`. Otherwise `query` is a raw entity-type string ("zombie") resolved client-side (mirrors the deleted EntityFinder's old shape -- Python has no non-player entity tracking to resolve this itself). Both null means "nearest hostile mob". */
+    record Kill(Integer entityId, String query) implements Command {
     }
 
     /** !defend [player] -- standing protection mode: auto-fights the nearest hostile to `defendTargetEntityId`, staying near that entity between fights (same real Follow-style name->id resolution Python already does for !follow -- see MovementController's own docstring). `defendTargetEntityId` null means "defend the bot itself" (no argument given). */

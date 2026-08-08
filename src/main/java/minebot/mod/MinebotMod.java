@@ -351,14 +351,19 @@ public final class MinebotMod implements ClientModInitializer {
                 commandBus.publish(new Command.Stop());
             }
             case "kill" -> {
-                // "query" is optional -- absent/null means "nearest
-                // hostile mob" (see Command.Kill/PlayerIntentionKillNode's own
-                // docstrings). Deliberately does NOT touch
-                // playerIntention -- !kill is a one-shot trigger, not a
-                // standing goal (see PlayerIntention's own docstring for
-                // why KILL isn't a PlayerIntention value at all).
+                // "entity_id"/"query" are both optional -- "entity_id"
+                // (a player, resolved Python-side via EntityTracker, same
+                // as !defend's own target) takes priority when present;
+                // otherwise "query" is a raw entity-type string; both
+                // absent/null means "nearest hostile mob" (see
+                // Command.Kill/PlayerIntentionKillNode's own docstrings).
+                // Deliberately does NOT touch playerIntention -- !kill is
+                // a one-shot trigger, not a standing goal (see
+                // PlayerIntention's own docstring for why KILL isn't a
+                // PlayerIntention value at all).
+                Integer entityId = json.has("entity_id") && !json.get("entity_id").isJsonNull() ? json.get("entity_id").getAsInt() : null;
                 String query = json.has("query") && !json.get("query").isJsonNull() ? json.get("query").getAsString() : null;
-                commandBus.publish(new Command.Kill(query));
+                commandBus.publish(new Command.Kill(entityId, query));
             }
             case "defend" -> {
                 // "entity_id" is optional -- absent/null means "defend
