@@ -19,6 +19,14 @@ import java.util.Deque;
  * works for a small ledge but not a real drop/climb requiring an actual
  * route, confirmed live: the bot stood at the edge of a floor instead of
  * finding a way down to a lower one).
+ *
+ * "Fresh" means fresh against the CALLER'S constraints too, not just the
+ * target's position -- stopDistance and avoidLiquid (see maybeReplan's
+ * own docstring) are both baked into the plan itself (via GoalNear and
+ * Movements.avoidLiquid respectively), so a change to either one is
+ * staleness on its own, independent of whether the target or the bot
+ * actually moved (see stopDistanceComputedFor/avoidLiquidComputedFor's
+ * own docstrings for the live bugs this guards against).
  */
 public final class PathTracker {
     private static final long PATHFINDING_TIMEOUT_MILLIS = 1000;
@@ -57,8 +65,9 @@ public final class PathTracker {
     // planned with avoidLiquid=false is not valid to keep reusing once a
     // caller asks with avoidLiquid=true (e.g. LegsFleeNode kicking in
     // right after LegsNavigateNode was using this same shared tracker --
-    // see PathTracker's own class docstring for why one instance is
-    // shared across every Legs node that walks), and vice versa.
+    // see LegsNavigateNode's own class docstring for why one PathTracker
+    // instance is shared across every Legs node that walks), and vice
+    // versa.
     private boolean avoidLiquidComputedFor;
 
     /**

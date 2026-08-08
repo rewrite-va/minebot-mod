@@ -47,6 +47,18 @@ import java.util.List;
  * unknown" is the safe default for a pathfinder whose whole point is not
  * falling through unseen gaps.
  *
+ * Water/lava is walkable by default -- real vanilla liquids have no
+ * collision box, so a liquid tile counts as `safe` the same as air, just
+ * with a small +1.0 liquidCost nudge per move (getMoveForward/
+ * getMoveDiagonal) discouraging it without forbidding it, so A* still
+ * crosses a stream/pond when that's genuinely the shortest route.
+ * avoidLiquid (false by default) overrides this per-instance: with it
+ * set, liquid tiles are `!safe` instead, which safeOrBreak turns into a
+ * hard BLOCKED for every move type at once (not just the two that add
+ * liquidCost) -- see avoidLiquid's own field docstring for why
+ * (Legs:FLEE routing INTO water while retreating is worse than a longer
+ * dry detour).
+ *
  * Dig cost: movements.js's safeOrBreak computes a "labor cost" from an
  * estimated digTime looked up in a client-less registry dump (mineflayer
  * has no real client to ask). This mod has an actual LocalPlayer and
