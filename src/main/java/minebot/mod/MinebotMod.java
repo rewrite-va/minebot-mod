@@ -136,8 +136,11 @@ public final class MinebotMod implements ClientModInitializer {
     // The generic Task queue described in prompt.txt/TaskController's own
     // docstring -- ticked directly, outside every peer StateMachine, same
     // precedent DeathWatcher/InventoryController's own tick() already
-    // established. !give is its first real Task (GiveTask).
-    private final TaskController taskController = new TaskController(playerIntentionStateMachine);
+    // established. !give is its first real Task (GiveTask). busyReporter
+    // is MinebotMod::sendChat -- see TaskController's own docstring for
+    // why a real chat send, not a wire event, is the right channel for
+    // its "can't start yet, busy" report.
+    private final TaskController taskController = new TaskController(playerIntentionStateMachine, MinebotMod::sendChat);
     private ControlClient controlClient;
     private float lastReportedHealth = -1;
 
@@ -145,7 +148,7 @@ public final class MinebotMod implements ClientModInitializer {
     public void onInitializeClient() {
         controlClient = new ControlClient("localhost", ControlClient.DEFAULT_PORT, this::handleMessage, this::onControlChannelConnected);
         controlClient.start();
-        new StatusHud(controlClient, List.of(playerIntentionStateMachine, legsStateMachine, headStateMachine, handsStateMachine), blackboard).register();
+        new StatusHud(controlClient, List.of(playerIntentionStateMachine, legsStateMachine, headStateMachine, handsStateMachine), blackboard, taskController).register();
         new PathVisualizer(legsPathTracker).register();
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onClientTick);
@@ -446,9 +449,8 @@ public final class MinebotMod implements ClientModInitializer {
                 // message is an instant, one-shot side effect with no
                 // ongoing state, the same reasoning PlayerIntentionDeadNode's
                 // own docstring gives for DEAD's direct respawn() call.
-                Minecraft client = Minecraft.getInstance();
-                if (client.player != null && json.has("text")) {
-                    client.player.connection.sendChat(json.get("text").getAsString());
+                if (json.has("text")) {
+                    sendChat(json.get("text").getAsString());
                 }
             }
             default -> LOGGER.warn("control channel: unknown command type '{}'", type);
@@ -463,6 +465,14 @@ public final class MinebotMod implements ClientModInitializer {
         }
         event.addProperty("text", text);
         controlClient.sendEvent(event.toString());
+    }
+
+    /** A genuine vanilla chat SEND, same mechanism/visibility as the "chat" dispatch case above (see its own docstring) -- pulled out into its own static method so TaskController's busyReporter can use it too via a plain method reference, without needing a real dependency on MinebotMod itself. Static (not instance) since it only ever needs Minecraft.getInstance(), the same reasoning EntityFinder/WaypointClassifier's own static-utility shape already established for stateless real-game-state reads. Null-safe the same way the original inline call was -- player can be null for the handful of ticks before the world/player actually loads. */
+    static void sendChat(final String text) {
+        Minecraft client = Minecraft.getInstance();
+        if (client.player != null) {
+            client.player.connection.sendChat(text);
+        }
     }
 
     /**

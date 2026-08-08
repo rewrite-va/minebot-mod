@@ -10,6 +10,7 @@ import net.minecraft.world.entity.Entity;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.function.Consumer;
 
 /**
  * A generic, ticked-directly (outside every peer StateMachine, same
@@ -32,10 +33,24 @@ import java.util.Deque;
  *
  * Only one Task is ever "current" at a time -- a fresh Task is dequeued
  * only once the current one finishes (isFinished()) AND isBusy() says the
- * bot isn't otherwise occupied (see canDequeueTask()). Nothing here
- * preempts an in-progress Task the way e.g. KILL preempts PlayerIntention
- * -- per prompt.txt's own design, a Task, once current, runs to
- * completion before anything else is dequeued.
+ * bot isn't otherwise occupied (see tick()'s own dequeue check). Nothing
+ * here preempts an in-progress Task the way e.g. KILL preempts
+ * PlayerIntention -- per prompt.txt's own design, a Task, once current,
+ * runs to completion before anything else is dequeued.
+ *
+ * `busyReporter` sends one real chat line the first tick a freshly-
+ * enqueued task can't actually start (isBusy() holds) -- added after a
+ * live !sleep sat silently queued behind an active DEFEND-with-nearby-
+ * hostile: Python's own immediate "ok, looking for a bed" reply is sent
+ * at dispatch time, before this class has any chance to know whether the
+ * task can actually run, so it can't reflect this on its own. A real
+ * chat send (not a wire event Python would need to relay) since this is
+ * closer to vanilla's own in-game system messages -- the same reasoning
+ * SleepTask's own docstring gives for leaning on real sleep-rejection
+ * messages instead of inventing a Python-side signal. Deliberately fires
+ * only ONCE per stuck task (see reportedBusyForFront below), not every
+ * tick it stays queued -- isBusy() can hold for a long, ongoing fight;
+ * repeating the same line every tick would spam chat the whole time.
  */
 public final class TaskController {
     // How close a hostile has to be, while DEFEND is the live PlayerIntention
@@ -46,16 +61,31 @@ public final class TaskController {
     private static final double BUSY_THREAT_RADIUS = CombatEngagement.SEARCH_RADIUS;
 
     private final StateMachine<PlayerIntentionState> playerIntentionStateMachine;
+    private final Consumer<String> busyReporter;
     private final Deque<Task> queue = new ArrayDeque<>();
     private Task currentTask;
+    // True once busyReporter has already fired for the task currently at
+    // the front of the queue -- reset whenever the queue's front changes
+    // (a new task arrives, or the stuck one is finally dequeued), so each
+    // distinct stuck task gets exactly one report, not zero or many.
+    private boolean reportedBusyForFront;
 
-    public TaskController(final StateMachine<PlayerIntentionState> playerIntentionStateMachine) {
+    public TaskController(final StateMachine<PlayerIntentionState> playerIntentionStateMachine, final Consumer<String> busyReporter) {
         this.playerIntentionStateMachine = playerIntentionStateMachine;
+        this.busyReporter = busyReporter;
     }
 
     /** Adds `task` to the back of the queue -- runs once every task ahead of it (if any) has finished and the bot isn't busy. */
     public void enqueue(final Task task) {
+        if (queue.isEmpty() && currentTask == null) {
+            reportedBusyForFront = false;
+        }
         queue.add(task);
+    }
+
+    /** Total tasks not yet finished -- the queue itself plus the current task, if any (0 when nothing at all is queued/running). Read by StatusHud so queue depth is visible on the HUD the same way SM state already is, instead of only inferable from the game log. */
+    public int pendingTaskCount() {
+        return queue.size() + (currentTask != null ? 1 : 0);
     }
 
     /** Call once per client tick. First enqueues a fresh GiveTask/SleepTask for every Command.Give/Command.Sleep seen this tick (the cross-thread handoff CommandBus exists for -- see Command.Give/Command.Sleep's own docstrings), then ticks the current task if there is one (retiring it via onExit the moment it reports isFinished()), otherwise dequeues a fresh one if canDequeueTask() allows it. */
@@ -74,20 +104,24 @@ public final class TaskController {
             if (currentTask.isFinished()) {
                 currentTask.onExit(ctx);
                 currentTask = null;
+                reportedBusyForFront = false;
             }
             return;
         }
 
-        if (!canDequeueTask(ctx)) {
+        if (queue.isEmpty()) {
+            return;
+        }
+        if (isBusy(ctx)) {
+            if (!reportedBusyForFront) {
+                reportedBusyForFront = true;
+                busyReporter.accept("busy defending against a nearby threat -- queued task will run once that's clear");
+            }
             return;
         }
         currentTask = queue.poll();
+        reportedBusyForFront = false;
         currentTask.onEnter(ctx);
-    }
-
-    /** False if the queue is empty, a task is already current (only reached here when it's null, so this is really just documenting the invariant tick() already enforces), or isBusy() says the bot is occupied with something outside the task system entirely. */
-    private boolean canDequeueTask(final TickContext ctx) {
-        return !queue.isEmpty() && currentTask == null && !isBusy(ctx);
     }
 
     /**

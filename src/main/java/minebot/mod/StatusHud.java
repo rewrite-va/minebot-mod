@@ -7,6 +7,7 @@ import minebot.mod.statemachine.playerintention.CombatEngagement;
 import minebot.mod.statemachine.playerintention.NavIntent;
 import minebot.mod.statemachine.hands.HandsEatNode;
 import minebot.mod.statemachine.legs.LegsNavigateNode;
+import minebot.mod.task.TaskController;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
@@ -82,6 +83,15 @@ import java.util.List;
  * list keeps this in one obvious place to update when a key worth
  * watching is added, the same reasoning nodeColor()'s own docstring
  * gives for not needing a per-state color list.
+ *
+ * Directly below the blackboard-value lines, a "tasks queued: N" line
+ * reads TaskController.pendingTaskCount() -- added per explicit request
+ * after a live !sleep sat silently queued behind an active DEFEND-with-
+ * nearby-hostile with no on-screen indication anything was even pending
+ * (only visible by reading the game log). TaskController isn't a peer
+ * StateMachine (see its own docstring for why -- no currentState() to
+ * read the way stateMachines' entries have), so this is a separate field/
+ * line rather than folded into the SM-state loop above.
  */
 public final class StatusHud {
     private static final int COLOR_CONNECTED = 0xFF55FF55;
@@ -132,11 +142,13 @@ public final class StatusHud {
     private final ControlClient controlClient;
     private final List<StateMachine<?>> stateMachines;
     private final Blackboard blackboard;
+    private final TaskController taskController;
 
-    public StatusHud(final ControlClient controlClient, final List<StateMachine<?>> stateMachines, final Blackboard blackboard) {
+    public StatusHud(final ControlClient controlClient, final List<StateMachine<?>> stateMachines, final Blackboard blackboard, final TaskController taskController) {
         this.controlClient = controlClient;
         this.stateMachines = stateMachines;
         this.blackboard = blackboard;
+        this.taskController = taskController;
     }
 
     public void register() {
@@ -164,6 +176,8 @@ public final class StatusHud {
         List<String> blackboardLabels = BLACKBOARD_KEYS_TO_DISPLAY.stream().map(key -> key.name() + ": ").toList();
         List<String> blackboardValues = BLACKBOARD_KEYS_TO_DISPLAY.stream().map(this::formatBlackboardValue).toList();
 
+        String tasksQueuedLine = "tasks queued: " + taskController.pendingTaskCount();
+
         Font font = Minecraft.getInstance().font;
         int widestLine = Math.max(font.width(connectionLine), font.width(sprintLine));
         for (int i = 0; i < smLabels.size(); i++) {
@@ -172,7 +186,8 @@ public final class StatusHud {
         for (int i = 0; i < blackboardLabels.size(); i++) {
             widestLine = Math.max(widestLine, font.width(blackboardLabels.get(i)) + font.width(blackboardValues.get(i)));
         }
-        int totalLines = 2 + smLabels.size() + blackboardLabels.size();
+        widestLine = Math.max(widestLine, font.width(tasksQueuedLine));
+        int totalLines = 3 + smLabels.size() + blackboardLabels.size();
         guiGraphics.fill(
             4 - PANEL_PADDING,
             4 - PANEL_PADDING,
@@ -200,6 +215,7 @@ public final class StatusHud {
             guiGraphics.text(font, value, 4 + font.width(label), y, COLOR_BLACKBOARD_VALUE, true);
             y += LINE_HEIGHT;
         }
+        guiGraphics.text(font, tasksQueuedLine, 4, y, COLOR_BLACKBOARD_LABEL, true);
     }
 
     /**
