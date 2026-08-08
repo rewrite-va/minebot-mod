@@ -64,6 +64,20 @@ import net.minecraft.world.phys.Vec3;
  * (PlayerIntentionKillNode/TaskController) -- this was previously the
  * one outlier searching/ranking around the defend target's position
  * instead, which is the bug this docstring update corrects.
+ *
+ * ONLY VISIBLE hostiles are ever eligible to fight -- EntityFinder.
+ * findNearestVisibleHostile (not the plain findNearestHostile
+ * PlayerIntentionKillNode/TaskController still use) requires a clear
+ * eye-to-eye line of sight, and an already-engaged currentThreat that
+ * loses line of sight mid-fight (fled behind a wall, dropped into a
+ * hole) is dropped the same way an out-of-defend-range one already was.
+ * Added specifically because DEFEND was locking onto and pathing toward
+ * hostiles it had no real line to -- an underground/behind-terrain
+ * zombie, for instance -- sending Legs toward a target it could never
+ * actually reach in a straight line. Deliberately DEFEND-only: a bare
+ * `!kill` with no query, and TaskController's own busy-threat interrupt,
+ * both still use plain findNearestHostile and may target a
+ * heard-but-not-yet-seen mob, unchanged.
  */
 public final class PlayerIntentionDefendNode implements StateNode<PlayerIntentionState> {
     // Centered on the bot's own position (see this class's own docstring
@@ -119,9 +133,19 @@ public final class PlayerIntentionDefendNode implements StateNode<PlayerIntentio
             currentThreat = null;
             targetEntityId = -1;
         }
+        // Same treatment for a threat that's lost line of sight since the
+        // last tick (fled behind a wall, dropped into a hole) -- see this
+        // class's own docstring for why DEFEND only ever engages VISIBLE
+        // hostiles: chasing a target it can't see means blindly pathing
+        // toward its last-known position, exactly the "walking toward an
+        // underground zombie" bug this exists to prevent.
+        if (currentThreat != null && !EntityFinder.hasLineOfSight(ctx.level, ctx.player, currentThreat)) {
+            currentThreat = null;
+            targetEntityId = -1;
+        }
 
         Vec3 botPosition = ctx.player.position();
-        Entity nearestThreat = EntityFinder.findNearestHostile(ctx.level, botPosition, THREAT_SEARCH_RADIUS);
+        Entity nearestThreat = EntityFinder.findNearestVisibleHostile(ctx.level, ctx.player, THREAT_SEARCH_RADIUS);
         if (nearestThreat != null && !withinDefendRange(nearestThreat, anchor)) {
             nearestThreat = null;
         }

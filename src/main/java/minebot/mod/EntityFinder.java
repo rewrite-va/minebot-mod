@@ -1,13 +1,17 @@
 package minebot.mod;
 
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.animal.bee.Bee;
 import net.minecraft.world.entity.animal.polarbear.PolarBear;
 import net.minecraft.world.entity.animal.wolf.Wolf;
 import net.minecraft.world.entity.monster.Enemy;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
 /**
@@ -96,6 +100,53 @@ public final class EntityFinder {
         }
 
         return nearest;
+    }
+
+    /**
+     * Same as findNearestHostile, but additionally requires a clear
+     * eye-to-eye line of sight from `player` -- added specifically for
+     * PlayerIntentionDefendNode (see its own docstring), which was
+     * locking onto and pathing toward hostiles it had no real line to
+     * (an underground/behind-a-wall zombie, for instance), sending Legs
+     * toward a target it could never actually reach in a straight line.
+     * A blocked-but-closer hostile is simply skipped, not preferred over
+     * a farther visible one -- "nearest AMONG VISIBLE", never "nearest
+     * overall, visibility be damned". Deliberately NOT applied to
+     * findNearestHostile's other two callers (PlayerIntentionKillNode's
+     * bare `!kill` fallback, TaskController's busy-threat interrupt) --
+     * per explicit direction, this is a DEFEND-specific fix, and an
+     * explicit `!kill` with no query is allowed to path toward a
+     * heard-but-not-yet-seen mob same as before.
+     */
+    public static Entity findNearestVisibleHostile(final ClientLevel level, final LocalPlayer player, final double radius) {
+        Vec3 center = player.position();
+        AABB searchBox = AABB.ofSize(center, radius * 2, radius * 2, radius * 2);
+        double radiusSquared = radius * radius;
+
+        Entity nearest = null;
+        double nearestDistanceSquared = Double.MAX_VALUE;
+
+        for (Entity entity : level.getEntitiesOfClass(Entity.class, searchBox, EntityFinder::isHostileNow)) {
+            double distanceSquared = entity.distanceToSqr(center);
+            if (distanceSquared > radiusSquared) {
+                continue;
+            }
+            if (distanceSquared < nearestDistanceSquared && hasLineOfSight(level, player, entity)) {
+                nearest = entity;
+                nearestDistanceSquared = distanceSquared;
+            }
+        }
+
+        return nearest;
+    }
+
+    /** Real eye-to-eye raycast against solid blocks (ClipContext.Block.COLLIDER, matching what actually stops a real attack/arrow) -- MISS means a clear line of sight. Fluids are deliberately not checked (ClipContext.Fluid.NONE) -- water/lava don't block sight the way a solid block does. Same real formula HandsDrawBowNode/HandsDrawCrossbowNode's own hasLineOfSight already use for firing -- copied, not shared, matching this codebase's own established precedent of keeping each short raycast local rather than a shared utility for a two-line check. */
+    public static boolean hasLineOfSight(final ClientLevel level, final LocalPlayer player, final Entity target) {
+        Vec3 from = player.getEyePosition();
+        Vec3 to = target.getEyePosition();
+        ClipContext clipContext = new ClipContext(from, to, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player);
+        BlockHitResult hit = level.clip(clipContext);
+        return hit.getType() == HitResult.Type.MISS;
     }
 
     // How close a wild adult PolarBear needs a baby PolarBear to be
