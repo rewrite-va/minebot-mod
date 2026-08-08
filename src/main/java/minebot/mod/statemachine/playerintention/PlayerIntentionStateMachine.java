@@ -67,6 +67,12 @@ import java.util.function.Predicate;
  * superseding DEFEND (via a fresh !kill while defending) exits straight
  * back to DEFEND through the same intendsDefend resume edge every other
  * intention uses, once that kill itself finishes.
+ *
+ * SLEEP mirrors KILL's edge shape exactly (reachable from IDLE/FOLLOW/
+ * DEFEND, resumes intention's current state once sleepNode.isFinished(),
+ * a self-loop for a fresh !sleep re-triggering while already sleeping) --
+ * see PlayerIntentionState/PlayerIntentionSleepNode's own docstrings for
+ * why it's a one-shot trigger, not a standing value, same as KILL.
  */
 public final class PlayerIntentionStateMachine {
     private PlayerIntentionStateMachine() {
@@ -75,18 +81,21 @@ public final class PlayerIntentionStateMachine {
     public static StateMachine<PlayerIntentionState> create(final PlayerIntention intention) {
         PlayerIntentionKillNode killNode = new PlayerIntentionKillNode();
         PlayerIntentionDefendNode defendNode = new PlayerIntentionDefendNode(intention);
+        PlayerIntentionSleepNode sleepNode = new PlayerIntentionSleepNode();
 
         Map<PlayerIntentionState, StateNode<PlayerIntentionState>> nodes = Map.of(
             PlayerIntentionState.IDLE, new PlayerIntentionIdleNode(),
             PlayerIntentionState.FOLLOW, new PlayerIntentionFollowNode(intention),
             PlayerIntentionState.DEFEND, defendNode,
-            PlayerIntentionState.KILL, killNode
+            PlayerIntentionState.KILL, killNode,
+            PlayerIntentionState.SLEEP, sleepNode
         );
 
         Predicate<TickContext> isFollowCommand = ctx -> Commands.has(ctx.commands, Command.Follow.class);
         Predicate<TickContext> isDefendCommand = ctx -> Commands.has(ctx.commands, Command.Defend.class);
         Predicate<TickContext> isStopCommand = ctx -> Commands.has(ctx.commands, Command.Stop.class);
         Predicate<TickContext> isKillCommand = ctx -> Commands.has(ctx.commands, Command.Kill.class);
+        Predicate<TickContext> isSleepCommand = ctx -> Commands.has(ctx.commands, Command.Sleep.class);
         Predicate<TickContext> intendsIdle = ctx -> intention.current().state() == PlayerIntentionState.IDLE;
         Predicate<TickContext> intendsFollow = ctx -> intention.current().state() == PlayerIntentionState.FOLLOW;
         Predicate<TickContext> intendsDefend = ctx -> intention.current().state() == PlayerIntentionState.DEFEND;
@@ -114,7 +123,24 @@ public final class PlayerIntentionStateMachine {
             // A fresh !kill while ALREADY in KILL (re-target) -- see this
             // class's own docstring for why this is the ONLY KILL->KILL
             // edge (no "target died, keep fighting" loop).
-            new Edge<>(PlayerIntentionState.KILL, PlayerIntentionState.KILL, isKillCommand)
+            new Edge<>(PlayerIntentionState.KILL, PlayerIntentionState.KILL, isKillCommand),
+            // !sleep interrupting an active KILL -- symmetric with !kill
+            // interrupting an active SLEEP below.
+            new Edge<>(PlayerIntentionState.KILL, PlayerIntentionState.SLEEP, isSleepCommand),
+
+            // SLEEP mirrors KILL's edge shape exactly -- see this class's
+            // own docstring.
+            new Edge<>(PlayerIntentionState.IDLE, PlayerIntentionState.SLEEP, isSleepCommand),
+            new Edge<>(PlayerIntentionState.FOLLOW, PlayerIntentionState.SLEEP, isSleepCommand),
+            new Edge<>(PlayerIntentionState.DEFEND, PlayerIntentionState.SLEEP, isSleepCommand),
+            new Edge<>(PlayerIntentionState.SLEEP, PlayerIntentionState.IDLE, ctx -> isStopCommand.test(ctx) || (sleepNode.isFinished() && intendsIdle.test(ctx))),
+            new Edge<>(PlayerIntentionState.SLEEP, PlayerIntentionState.FOLLOW, ctx -> isFollowCommand.test(ctx) || (sleepNode.isFinished() && intendsFollow.test(ctx))),
+            new Edge<>(PlayerIntentionState.SLEEP, PlayerIntentionState.DEFEND, ctx -> isDefendCommand.test(ctx) || (sleepNode.isFinished() && intendsDefend.test(ctx))),
+            // !kill interrupting an active SLEEP -- a fresh !kill should
+            // win over an in-progress walk-to-bed, same priority a fresh
+            // !kill already has over FOLLOW/DEFEND above.
+            new Edge<>(PlayerIntentionState.SLEEP, PlayerIntentionState.KILL, isKillCommand),
+            new Edge<>(PlayerIntentionState.SLEEP, PlayerIntentionState.SLEEP, isSleepCommand)
         );
 
         return new StateMachine<>("playerintention", PlayerIntentionState.IDLE, nodes, edges);

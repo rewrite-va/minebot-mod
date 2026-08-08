@@ -415,6 +415,15 @@ public final class MinebotMod implements ClientModInitializer {
                 int quantity = json.has("quantity") && !json.get("quantity").isJsonNull() ? json.get("quantity").getAsInt() : 0;
                 commandBus.publish(new Command.Give(recipientEntityId, item, quantity));
             }
+            case "sleep" -> {
+                // No data at all -- "nearest bed" is the only meaningful
+                // target (see Command.Sleep's own docstring). Deliberately
+                // does NOT touch playerIntention -- like kill/pickup/give,
+                // this is a one-shot trigger, not a standing goal (see
+                // PlayerIntentionState's own docstring for why SLEEP isn't
+                // a PlayerIntention value at all).
+                commandBus.publish(new Command.Sleep());
+            }
             case "chat" -> {
                 // Re-added -- was one of the commands stripped down to
                 // nothing during the peer-state-machine rewrite (see this

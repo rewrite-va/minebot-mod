@@ -40,4 +40,8 @@ public sealed interface Command {
     /** !give [recipient] [item] [quantity] -- read by TaskController.tick() (not any peer StateMachine) to enqueue a fresh GiveTask, the same cross-thread handoff shape every other Command uses (see CommandBus's own docstring for why this can't just be a direct TaskController.enqueue call from dispatchMessage: TaskController's queue, like Blackboard, is tick-thread-only, and dispatchMessage runs on the WebSocket library's own thread). `recipientEntityId` null means "give to the caller" (no recipient argument -- drop at the bot's own feet, no navigation needed). `item` is always a concrete registry id by the time it reaches here -- "the last item picked up" is resolved Python-side (minebot/bot/inventory.py, off InventoryTracker.last_gained_item), never left for the mod to guess (see GiveTask's own docstring for why: a single source of truth for that fact, not two independently-tracked ones). `quantity <= 0` means "the whole stack" (see InventoryController.dropItem()'s own docstring). */
     record Give(Integer recipientEntityId, String item, int quantity) implements Command {
     }
+
+    /** !sleep -- walk to the nearest bed and sleep in it. A one-shot TRIGGER, same shape as Kill/Pickup (see PlayerIntentionSleepNode's own docstring for why this isn't a standing PlayerIntention value either) -- deliberately carries no data, there's nothing to parameterize (unlike Kill's optional query): "nearest bed" is the only meaningful target, resolved entirely client-side via BlockFinder since Python has no block-scanning of its own. */
+    record Sleep() implements Command {
+    }
 }
