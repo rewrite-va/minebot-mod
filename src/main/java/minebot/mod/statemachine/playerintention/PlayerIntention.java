@@ -57,25 +57,38 @@ package minebot.mod.statemachine.playerintention;
 public final class PlayerIntention {
     /**
      * state is IDLE, FOLLOW, or DEFEND -- never KILL, which is always
-     * incidental, never player-intended. followEntityId is only
-     * meaningful when state == FOLLOW. defendTargetEntityId is only
+     * incidental, never player-intended. followPlayerName is only
+     * meaningful when state == FOLLOW. defendTargetPlayerName is only
      * meaningful when state == DEFEND -- null means "defend the bot
      * itself" (no argument given to !defend), matching Command.Defend's
      * own shape.
+     *
+     * Carries the target's real player NAME, not a pre-resolved entity id
+     * or UUID -- per explicit direction ("python sends only playernames,
+     * we need to make all classes to use playernames as the source of
+     * truth"): a name is stable for the bot's entire session and never
+     * "goes stale" the way a resolved id/uuid/position snapshot can.
+     * PlayerIntentionFollowNode/PlayerIntentionDefendNode re-resolve
+     * whatever they actually need (a live entity id, or a UUID for
+     * WaypointFinder) FRESH every tick via PlayerController (see its own
+     * docstring for exactly which real Minecraft API backs each kind of
+     * lookup, and why no single API answers all of them) -- this record
+     * itself never holds an id/uuid at all, so there's nothing here that
+     * can ever go stale between commands.
      */
-    public record Snapshot(PlayerIntentionState state, int followEntityId, Integer defendTargetEntityId) {
-        public static final Snapshot IDLE = new Snapshot(PlayerIntentionState.IDLE, -1, null);
+    public record Snapshot(PlayerIntentionState state, String followPlayerName, String defendTargetPlayerName) {
+        public static final Snapshot IDLE = new Snapshot(PlayerIntentionState.IDLE, null, null);
     }
 
     private volatile Snapshot current = Snapshot.IDLE;
 
-    public void follow(final int entityId) {
-        current = new Snapshot(PlayerIntentionState.FOLLOW, entityId, null);
+    public void follow(final String playerName) {
+        current = new Snapshot(PlayerIntentionState.FOLLOW, playerName, null);
     }
 
-    /** `defendTargetEntityId` null means "defend the bot itself" -- see Snapshot's own docstring. */
-    public void defend(final Integer defendTargetEntityId) {
-        current = new Snapshot(PlayerIntentionState.DEFEND, -1, defendTargetEntityId);
+    /** `defendTargetPlayerName` null means "defend the bot itself" -- see Snapshot's own docstring. */
+    public void defend(final String defendTargetPlayerName) {
+        current = new Snapshot(PlayerIntentionState.DEFEND, null, defendTargetPlayerName);
     }
 
     public void stop() {

@@ -228,12 +228,17 @@ public final class MinebotMod implements ClientModInitializer {
         // since the last tick (from dispatchMessage, a different thread
         // -- see CommandBus's own docstring) is visible to exactly one
         // tick's worth of edge conditions, never dropped/double-counted.
-        // Legs before Head/Hands so both see Legs' just-published state
-        // this same tick (WAYPOINT_COORDINATES/etc. are written directly
-        // during Legs' own onTick, so they're fresh same-tick regardless
-        // of ordering; LegsState itself is only published at the end of
-        // legsStateMachine.tick(), so Head/Hands reading it here still
-        // see this tick's real value since they run after).
+        // Legs before Hands before Head, so each sees the previous one's
+        // just-published state this same tick (WAYPOINT_COORDINATES/etc.
+        // are written directly during Legs' own onTick, so they're fresh
+        // same-tick regardless of ordering; HandsMineNode.
+        // CURRENT_MINING_TARGET is likewise written directly during Hands'
+        // own onTick, specifically so HeadMineNode can read this same
+        // tick's real committed mining target rather than one tick stale --
+        // see HandsMineNode/HeadMineNode's own docstrings for the live bug
+        // this ordering fixes; LegsState/HandsState themselves are each
+        // only published at the end of their own StateMachine.tick(), so
+        // whichever peer runs after still sees this tick's real value).
         TickContext ctx = new TickContext(player, level, blackboard, commandBus.drain(), minebotInput, legsPathTracker);
         // Before every peer SM -- LegsStateMachine's own GO_TO_DEATH_POSITION
         // entry edge reads DEATH_POSITION this same tick, so a fresh death
@@ -248,8 +253,12 @@ public final class MinebotMod implements ClientModInitializer {
         // placement above documents for DEATH_POSITION).
         taskController.tick(ctx);
         legsStateMachine.tick(ctx);
-        headStateMachine.tick(ctx);
+        // Hands before Head -- see this method's own tick-order comment
+        // above: HeadMineNode needs Hands' just-published
+        // CURRENT_MINING_TARGET to aim at the real committed block this
+        // same tick, not one tick late.
         handsStateMachine.tick(ctx);
+        headStateMachine.tick(ctx);
 
         // Always-on, independent of every StateMachine above -- see its
         // own docstring for why this doesn't need a state of its own
@@ -341,10 +350,17 @@ public final class MinebotMod implements ClientModInitializer {
     private void dispatchMessage(final String type, final JsonObject json) {
         switch (type) {
             case "follow" -> {
-                int entityId = json.get("entity_id").getAsInt();
+                // "player_name" is the real player name -- Python sends
+                // this unconditionally now, never a pre-resolved entity
+                // id (see PlayerIntention.Snapshot/PlayerController's own
+                // docstrings for why a name is the source of truth here:
+                // it never goes stale the way an id/uuid resolved once
+                // and never updated can, and PlayerController resolves
+                // whatever's actually needed fresh every tick instead).
+                String playerName = json.get("player_name").getAsString();
                 double stopDistance = json.has("stop_distance") ? json.get("stop_distance").getAsDouble() : 2.0;
-                playerIntention.follow(entityId);
-                commandBus.publish(new Command.Follow(entityId, stopDistance));
+                playerIntention.follow(playerName);
+                commandBus.publish(new Command.Follow(playerName, stopDistance));
             }
             case "stop" -> {
                 playerIntention.stop();
@@ -366,14 +382,13 @@ public final class MinebotMod implements ClientModInitializer {
                 commandBus.publish(new Command.Kill(entityId, query));
             }
             case "defend" -> {
-                // "entity_id" is optional -- absent/null means "defend
+                // "player_name" is optional -- absent/null means "defend
                 // the bot itself" (see Command.Defend/PlayerIntention's
-                // own docstrings). Same real Follow-style name->id
-                // resolution Python already does for !follow, when a
-                // real target is given.
-                Integer defendTargetEntityId = json.has("entity_id") && !json.get("entity_id").isJsonNull() ? json.get("entity_id").getAsInt() : null;
-                playerIntention.defend(defendTargetEntityId);
-                commandBus.publish(new Command.Defend(defendTargetEntityId));
+                // own docstrings). Same player-name-as-source-of-truth
+                // shape "follow" now uses, when a real target is given.
+                String defendTargetPlayerName = json.has("player_name") && !json.get("player_name").isJsonNull() ? json.get("player_name").getAsString() : null;
+                playerIntention.defend(defendTargetPlayerName);
+                commandBus.publish(new Command.Defend(defendTargetPlayerName));
             }
             case "pickup" -> {
                 // Deliberately does NOT touch playerIntention -- like

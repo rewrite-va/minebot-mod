@@ -43,6 +43,26 @@ package minebot.mod.statemachine.head;
  * cost worth avoiding specifically while already low on health and
  * trying to put distance between itself and danger.
  *
+ * MINE aims at whatever block HandsMineNode is actively committed to
+ * breaking (HandsMineNode.CURRENT_MINING_TARGET), including the near-
+ * vertical-safe offset and same-tick yRotO/xRotO snap the real per-frame
+ * crosshair raycast needs to actually land on the target (see
+ * HeadMineNode's own docstring for the live bug this fixed: mining used to
+ * set yaw/pitch directly from inside Hands' own tick, racing against this
+ * class's own NAVIGATE pitch-pinning with no coordination between them --
+ * the outcome depended purely on incidental tick-call order and which of
+ * BlockBreaker.tryBreak's several early-return branches fired that tick,
+ * and reproduced live as the bot's held keyAttack locking onto a block
+ * several positions away from its real intended target, forever). Takes
+ * priority over NAVIGATE (checked after AIM_AT_TARGET/FLEE but before
+ * NAVIGATE in HeadStateMachine's own edge table) since a path obstacle
+ * being mined always needs the bot actually looking at it, not merely
+ * toward the waypoint beyond it -- but yields to AIM_AT_TARGET/FLEE the
+ * same way NAVIGATE does, since a live combat threat or an active flee
+ * always outranks clearing a path obstacle (see HandsStateMachine's own
+ * blockedByObstacle predicate, which excludes fleeing for the identical
+ * reason on the Hands side).
+ *
  * More states (looking at a nearby player while idle, etc.) get added as
  * those behaviors are ported in later, per STATE_MACHINE.md's
  * "Implementation order" (built node by node, not all at once).
@@ -51,5 +71,6 @@ public enum HeadState {
     IDLE,
     NAVIGATE,
     AIM_AT_TARGET,
-    FLEE
+    FLEE,
+    MINE
 }

@@ -44,6 +44,17 @@ import java.util.List;
  * format was changed, since that was a completely separate string from
  * this one.
  *
+ * Directly below that, a "sprinting: true/false" line reads real
+ * LocalPlayer.isSprinting() state -- deliberately the actual physical
+ * state, not MovementIntent.sprint (what Legs is currently REQUESTING
+ * for the next tick's input). Added per explicit request, alongside
+ * work on LegsNavigateNode's own sprint run-up gating for real parkour
+ * jumps (see SPRINT_RUNUP_TICKS' own docstring) -- watching a jump-in-
+ * place bug live made clear there was no way to see at a glance whether
+ * the bot's sprint was actually engaged (real vanilla sprint state
+ * depends on more than just the requested input -- hunger, sneaking,
+ * etc. -- so the request and the real state can genuinely differ).
+ *
  * Also renders one line per registered StateMachine (see
  * STATE_MACHINE.md) showing its current state -- e.g. "playerintention:
  * FOLLOW" -- directly below the connection line, so a state machine's
@@ -75,6 +86,13 @@ import java.util.List;
 public final class StatusHud {
     private static final int COLOR_CONNECTED = 0xFF55FF55;
     private static final int COLOR_DISCONNECTED = 0xFFFF5555;
+    // Same green/not-green shape as the connection line -- sprinting is
+    // a real live LocalPlayer.isSprinting() read, not a MovementIntent
+    // request (see the render method's own comment for why those two
+    // differ), so this reflects what's actually happening physically,
+    // not just what Legs is currently asking for.
+    private static final int COLOR_SPRINTING = 0xFF55FF55;
+    private static final int COLOR_NOT_SPRINTING = 0xFFAAAAAA;
     // The "playerintention: "/"legs: "/etc. label itself -- plain white so the
     // node name (color-coded per node, see nodeColor()) is the only
     // thing drawing the eye's attention on each line, per explicit
@@ -129,6 +147,14 @@ public final class StatusHud {
         boolean connected = controlClient.isOpen();
         String connectionLine = "backend: " + (connected ? "connected" : "disconnected") + " (" + formatBuiltAt(BuildInfo.BUILT_AT) + ")";
 
+        // Real LocalPlayer state, not a Blackboard/MovementIntent value --
+        // player is null for the handful of ticks before the world/player
+        // actually loads (same reason CombatEngagement's own entity-name
+        // lookup above already null-checks Minecraft.getInstance().level).
+        Player player = Minecraft.getInstance().player;
+        boolean sprinting = player != null && player.isSprinting();
+        String sprintLine = "sprinting: " + (player == null ? "?" : sprinting);
+
         // "playerintention: " and "FOLLOW" kept as separate strings (not one
         // formatted line) since each half renders in its own color --
         // see the loop below.
@@ -139,14 +165,14 @@ public final class StatusHud {
         List<String> blackboardValues = BLACKBOARD_KEYS_TO_DISPLAY.stream().map(this::formatBlackboardValue).toList();
 
         Font font = Minecraft.getInstance().font;
-        int widestLine = font.width(connectionLine);
+        int widestLine = Math.max(font.width(connectionLine), font.width(sprintLine));
         for (int i = 0; i < smLabels.size(); i++) {
             widestLine = Math.max(widestLine, font.width(smLabels.get(i)) + font.width(nodeNames.get(i)));
         }
         for (int i = 0; i < blackboardLabels.size(); i++) {
             widestLine = Math.max(widestLine, font.width(blackboardLabels.get(i)) + font.width(blackboardValues.get(i)));
         }
-        int totalLines = 1 + smLabels.size() + blackboardLabels.size();
+        int totalLines = 2 + smLabels.size() + blackboardLabels.size();
         guiGraphics.fill(
             4 - PANEL_PADDING,
             4 - PANEL_PADDING,
@@ -157,8 +183,9 @@ public final class StatusHud {
 
         int color = connected ? COLOR_CONNECTED : COLOR_DISCONNECTED;
         guiGraphics.text(font, connectionLine, 4, 4, color, true);
+        guiGraphics.text(font, sprintLine, 4, 4 + LINE_HEIGHT, sprinting ? COLOR_SPRINTING : COLOR_NOT_SPRINTING, true);
 
-        int y = 4 + LINE_HEIGHT;
+        int y = 4 + 2 * LINE_HEIGHT;
         for (int i = 0; i < smLabels.size(); i++) {
             String label = smLabels.get(i);
             String nodeName = nodeNames.get(i);

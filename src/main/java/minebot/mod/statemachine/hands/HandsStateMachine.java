@@ -24,7 +24,7 @@ import java.util.function.Predicate;
  * WaypointClassifier -- see LegsNavigateNode/WaypointClassifier's own
  * docstrings for why this is live-checked, not baked into the plan.
  *
- * EAT takes priority over OPEN_DOOR/MELEE_ATTACK/DRAW_BOW -- reachable
+ * EAT takes priority over OPEN_DOOR/MELEE_ATTACK/DRAW_BOW/MINE -- reachable
  * from any of them whenever ALL of: health is low, something is actually
  * eatable right now, Legs is currently in FLEE, AND the live combat
  * target (if any) is farther than EAT_SAFE_DISTANCE away (HandsEatNode.
@@ -102,6 +102,14 @@ import java.util.function.Predicate;
  * time either state would even be reachable the bot is already roughly
  * at the right distance; what range-gating alone can't tell is whether a
  * wall is in the way).
+ *
+ * MINE is reachable only from IDLE (not from OPEN_DOOR, MELEE_ATTACK,
+ * DRAW_BOW, or DRAW_CROSSBOW directly) -- opening a door and mining an
+ * obstacle can't genuinely overlap for the same waypoint, and mining
+ * during any real fighting state is deliberately excluded (see
+ * blockedByObstacle's own comment for why fighting/fleeing take priority
+ * over clearing a path obstacle). See HandsMineNode's own docstring for
+ * the real mechanics.
  */
 public final class HandsStateMachine {
     private HandsStateMachine() {
@@ -127,7 +135,8 @@ public final class HandsStateMachine {
             HandsState.EAT, handsEatNode,
             HandsState.MELEE_ATTACK, new HandsMeleeAttackNode(),
             HandsState.DRAW_BOW, new HandsDrawBowNode(),
-            HandsState.DRAW_CROSSBOW, new HandsDrawCrossbowNode()
+            HandsState.DRAW_CROSSBOW, new HandsDrawCrossbowNode(),
+            HandsState.MINE, new HandsMineNode()
         );
 
         Predicate<TickContext> legsFleeing = ctx -> ctx.blackboard.get(legsStateMachine) == LegsState.FLEE;
@@ -148,6 +157,19 @@ public final class HandsStateMachine {
         // merely brushes past EAT_SAFE_DISTANCE and backs off again).
         Predicate<TickContext> canKeepEating = ctx -> canEatAtAll.test(ctx) && (farEnoughFromThreat.test(ctx) || handsEatNode.isBiteStillProtected());
         Predicate<TickContext> closedDoorAhead = ctx -> HandsOpenDoorNode.isClosedDoor(ctx, ctx.blackboard.get(LegsNavigateNode.WAYPOINT_COORDINATES));
+        // Mining is only meaningful while genuinely navigating toward a
+        // waypoint that needs it, not mid-fight or mid-flee -- swinging at
+        // a leaves block while also trying to melee a hostile or retreat
+        // would fight those other, higher-priority uses of the same hands/
+        // movement, same reasoning inCombat/EAT already apply to each
+        // other. !legsFleeing reuses the same predicate combat/EAT already
+        // gate on; PlayerIntention isn't checked directly here (unlike
+        // inCombat) since FOLLOW/PICKUP_ITEMS/etc. should all be able to
+        // mine through an obstacle on their way too, not just a bare
+        // "not fighting" state -- fleeing is the one real case (bot has an
+        // active combat target it's actively avoiding right now) worth
+        // excluding explicitly.
+        Predicate<TickContext> blockedByObstacle = ctx -> HandsMineNode.hasBlockToMine(ctx) && !legsFleeing.test(ctx);
         Predicate<TickContext> inCombat = ctx -> {
             PlayerIntentionState state = ctx.blackboard.get(playerIntentionStateMachine);
             return (state == PlayerIntentionState.KILL || state == PlayerIntentionState.DEFEND) && !legsFleeing.test(ctx);
@@ -184,9 +206,12 @@ public final class HandsStateMachine {
             new Edge<>(HandsState.MELEE_ATTACK, HandsState.EAT, canStartEating),
             new Edge<>(HandsState.DRAW_BOW, HandsState.EAT, canStartEating),
             new Edge<>(HandsState.DRAW_CROSSBOW, HandsState.EAT, canStartEating),
+            new Edge<>(HandsState.MINE, HandsState.EAT, canStartEating),
             new Edge<>(HandsState.EAT, HandsState.IDLE, ctx -> !canKeepEating.test(ctx)),
             new Edge<>(HandsState.IDLE, HandsState.OPEN_DOOR, closedDoorAhead),
             new Edge<>(HandsState.OPEN_DOOR, HandsState.IDLE, ctx -> !closedDoorAhead.test(ctx)),
+            new Edge<>(HandsState.IDLE, HandsState.MINE, blockedByObstacle),
+            new Edge<>(HandsState.MINE, HandsState.IDLE, ctx -> !blockedByObstacle.test(ctx)),
             new Edge<>(HandsState.IDLE, HandsState.MELEE_ATTACK, inMeleeAttackRange),
             new Edge<>(HandsState.MELEE_ATTACK, HandsState.IDLE, ctx -> !inMeleeAttackRange.test(ctx)),
             new Edge<>(HandsState.IDLE, HandsState.DRAW_BOW, shouldDrawBow),

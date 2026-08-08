@@ -1,5 +1,6 @@
 package minebot.mod.statemachine.legs;
 
+import minebot.mod.MinebotMod;
 import minebot.mod.MovementIntent;
 import minebot.mod.pathfinding.Move;
 import minebot.mod.pathfinding.WaypointClassifier;
@@ -9,6 +10,9 @@ import minebot.mod.statemachine.TickContext;
 import minebot.mod.statemachine.playerintention.NavIntent;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.phys.Vec3;
+
+import java.util.Collections;
+import java.util.List;
 
 /**
  * Walks toward whatever position PlayerIntention is currently publishing via
@@ -92,9 +96,91 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
      */
     public static final BlackboardKey<BlockPos> WAYPOINT_COORDINATES = new BlackboardKey<>("WAYPOINT_COORDINATES");
 
+    /**
+     * The block(s), if any, the current waypoint's own planned Move needs
+     * dug through to actually execute it (Move.toBreak, see its own
+     * docstring -- e.g. a leaves block sitting in the headroom of a
+     * getMoveJumpUp step) -- published alongside WAYPOINT_COORDINATES so
+     * HandsMineNode can drive BlockBreaker against the REAL planned
+     * target(s), not re-derive "what needs breaking" from the waypoint's
+     * own block state the way WaypointClassifier's door/farmland checks
+     * do. That live-reclassify approach doesn't work for toBreak: a jump
+     * move's obstruction can be a block ABOVE the landing waypoint (e.g.
+     * blockA/blockH in Movements.getMoveJumpUp), not the waypoint position
+     * itself, so there's no way to reconstruct which block(s) A* actually
+     * meant from the waypoint coordinates alone -- this has to come
+     * straight from the Move that was chosen. Empty (never null) when the
+     * current waypoint needs no digging, mirroring Move.toBreak's own
+     * never-null contract.
+     */
+    public static final BlackboardKey<List<BlockPos>> WAYPOINT_TO_BREAK = new BlackboardKey<>("WAYPOINT_TO_BREAK");
+
+    /**
+     * The exact position Move.digStance (see its own docstring) says the
+     * bot needs to be standing at while breaking WAYPOINT_TO_BREAK's own
+     * blocks -- null whenever WAYPOINT_TO_BREAK is empty. Deliberately
+     * NOT the same value as WAYPOINT_COORDINATES: that field is the
+     * move's DESTINATION (where Legs is walking/jumping TO), while digging
+     * happens from the move's ORIGIN (where the bot already is BEFORE
+     * completing the move) -- reported live: HandsMineNode's own arrival
+     * gate first compared against WAYPOINT_COORDINATES by mistake, which
+     * is a position the bot can never actually reach until the digging is
+     * done in the first place (a real chicken-and-egg deadlock, the same
+     * shape as the still-needs-digging jump-suppression fix elsewhere in
+     * this class). Published separately so HandsMineNode never has to
+     * guess or reconstruct which position a toBreak entry's own
+     * visibility was actually verified from at planning time.
+     */
+    public static final BlackboardKey<BlockPos> WAYPOINT_DIG_STANCE = new BlackboardKey<>("WAYPOINT_DIG_STANCE");
+
+    /**
+     * Consecutive on-ground ticks spent walking/sprinting toward the
+     * current waypoint, tracked so a requiresJump move (real parkour --
+     * see Move.requiresJump's own docstring) can hold off firing the
+     * jump key until real sprint speed has actually built up, not just
+     * fire it the instant walking starts. Reported live, tested live by
+     * hand: a 3-block parkour move ((-350,105,-1388) -> (-350,106,-1391),
+     * cost=9.0, d=3 in Movements.getMoveParkourForward) is a real jump a
+     * human player can make, but ONLY running -- jumping from a standing
+     * start doesn't carry anywhere near enough horizontal momentum to
+     * cross it. Confirmed via a live diagnostic trace: forward+jump
+     * fired correctly every single tick (intent computation was never
+     * the bug), but the bot's very first jump attempt fired on the same
+     * tick it started walking -- with zero run-up, real vanilla physics
+     * gave it a standing jump's momentum, it fell short, and every
+     * attempt after that repeated the identical short hop against the
+     * same wall forever. A plain step-up/jump-up move (requiresJump
+     * false) doesn't need this at all -- those only need to clear ~1
+     * block of height, well within standing-jump range, and gating them
+     * the same way would just add pointless delay to ordinary walking.
+     * Stored on the blackboard (not a field on this class) because
+     * walkTowardNavTarget is a static method shared with LegsFleeNode's
+     * own delegation into it (see this class's own docstring) -- no
+     * per-instance state naturally available to either caller, and
+     * fleeing was never going to fire a requiresJump move anyway
+     * (GoalNear-planned real waypoints aren't part of FLEE's own
+     * computed retreat-point publishing), so a single shared counter is
+     * fine. Reset (not incremented) on any tick that isn't actually
+     * building real run-up -- not on ground, not walking, not facing the
+     * waypoint, or not actually pressing forward this tick -- so a fall,
+     * a stop, a sideways correction, or a fresh path replan can't leave
+     * a stale count around from an unrelated earlier approach.
+     */
+    private static final BlackboardKey<Integer> SPRINT_RUNUP_TICKS = new BlackboardKey<>("SPRINT_RUNUP_TICKS");
+    // A real vanilla sprint ramps up from a standing start over roughly
+    // half a second (LivingEntity's own gradual speed-attribute
+    // acceleration, not instant), so a handful of ticks of forward
+    // pressure should already be well clear of that -- not tuned against
+    // a precise measured vanilla constant, just picked comfortably above
+    // the ramp-up window. Worth re-checking against a live retry of the
+    // exact jump this was built for ((-350,105,-1388) -> (-350,106,-1391))
+    // if it still falls short.
+    private static final int SPRINT_RUNUP_TICKS_REQUIRED = 8;
+
     @Override
     public void onEnter(final TickContext ctx, final LegsState previousState) {
         ctx.pathTracker.reset();
+        ctx.blackboard.put(SPRINT_RUNUP_TICKS, 0);
     }
 
     @Override
@@ -106,6 +192,9 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
     public void onExit(final TickContext ctx) {
         ctx.input.setIntent(new MovementIntent());
         ctx.blackboard.put(WAYPOINT_COORDINATES, null);
+        ctx.blackboard.put(WAYPOINT_TO_BREAK, Collections.emptyList());
+        ctx.blackboard.put(WAYPOINT_DIG_STANCE, null);
+        ctx.blackboard.put(SPRINT_RUNUP_TICKS, 0);
     }
 
     /**
@@ -158,8 +247,10 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         double targetZ = targetPosition.z();
 
         ctx.pathTracker.maybeReplan(ctx.level, ctx.player, selfX, selfY, selfZ, targetX, targetY, targetZ, stopDistanceValue, avoidLiquid);
-        Move waypoint = ctx.pathTracker.nextWaypoint(selfX, selfY, selfZ, ctx.player.onGround());
+        Move waypoint = ctx.pathTracker.nextWaypoint(ctx.level, selfX, selfY, selfZ, ctx.player.onGround());
         ctx.blackboard.put(WAYPOINT_COORDINATES, waypoint != null ? new BlockPos(waypoint.x, waypoint.y, waypoint.z) : null);
+        ctx.blackboard.put(WAYPOINT_TO_BREAK, waypoint != null ? waypoint.toBreak : Collections.emptyList());
+        ctx.blackboard.put(WAYPOINT_DIG_STANCE, waypoint != null ? waypoint.digStance : null);
 
         // Aim at the next unreached waypoint's block center, or the raw
         // target if we have no plan (no path found / not yet computed) --
@@ -179,6 +270,7 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
 
         MovementIntent intent = new MovementIntent();
         boolean walking = horizontalDistance > distanceToStopAt;
+        boolean facingWaypoint = false;
         if (walking) {
             // World-space angle to the aim point (same atan2(-dx, dz)
             // convention as the old pipeline/BowShooter/BlockBreaker,
@@ -193,6 +285,12 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
             double targetYaw = Math.toDegrees(Math.atan2(-dx, dz));
             double relativeYaw = normalizeDegrees(targetYaw - ctx.player.getYRot());
             setDirectionalKeys(intent, relativeYaw);
+            // Same +-67.5 degree cone setDirectionalKeys itself uses to
+            // decide "forward" -- used below to gate a requiresJump move's
+            // jump input on ACTUALLY facing the target, not just intending
+            // to walk toward it (see requiresJumpSafeToFire's own comment
+            // for why).
+            facingWaypoint = relativeYaw > -67.5 && relativeYaw < 67.5;
         }
 
         // Same MAX_STEP_HEIGHT_TRIGGER/always-sprint reasoning as the old
@@ -206,12 +304,120 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         // happens to be standing on.
         boolean landingOnFarmland = waypoint != null && WaypointClassifier.classify(ctx.level, waypoint.x, waypoint.y, waypoint.z).farmland();
         double dy = aimY - selfY;
-        if (walking && dy > 0.1 && !landingOnFarmland) {
+        // dy > 0.1 alone misses a parkour-forward move that lands level
+        // with (or even below) takeoff -- Move.requiresJump (see its own
+        // docstring) is the real signal for "this move needs a jump
+        // input regardless of relative height", added specifically
+        // because a live parkour gap was being walked, not jumped, and
+        // failed every single attempt as a result (no jump input queued
+        // at all when dy was ~0).
+        boolean waypointRequiresJump = waypoint != null && waypoint.requiresJump;
+        // A requiresJump move additionally needs facingWaypoint -- live-
+        // confirmed via debug logging that Legs' own yaw can be up to ~90
+        // degrees off the real target angle for a tick or two right as the
+        // path advances onto a new waypoint (Head hasn't snapped yaw to
+        // the new target yet -- it ticks the SAME tick, right after Legs,
+        // so by next tick yaw has caught up, but this tick it's still
+        // stale). A plain step-up (dy > 0.1, requiresJump false) tolerates
+        // that fine -- vanilla's own step-up assist covers a slightly
+        // off-angle approach. A real jump over an actual gap does not: if
+        // relativeYaw is outside the forward cone on the exact tick jump
+        // fires, setDirectionalKeys produces a sideways-only intent (no
+        // forward key at all -- see its own comment), so the jump leaves
+        // with zero forward momentum in the intended direction and falls
+        // straight into the gap it was supposed to clear. Confirmed live:
+        // a jump fired with currentYaw=92.8 against a real target yaw of
+        // 169.4 produced exactly intent[right=true] with no forward key,
+        // and the bot fell all the way back down afterward. Simplest fix
+        // is to just wait a tick (or however many) until yaw has actually
+        // caught up before committing to the jump -- Head's per-tick snap
+        // means this is never more than a tick or two of extra delay, far
+        // cheaper than a failed jump that sends the bot back to the start
+        // of the whole climb.
+        // The waypoint's own toBreak blocks (if any) must be fully
+        // cleared before jumping is even attempted -- reported live: a
+        // jump-up move needing 2 leaf blocks broken through its headroom
+        // kept firing intent.jump every single tick regardless of mining
+        // progress, sending the bot repeatedly bouncing up and down.
+        // That bounce swings the bot's own eye height across a full
+        // block each cycle, which was enough to swing BlockBreaker's own
+        // per-tick aim angle off the target block and onto its neighbor,
+        // resetting vanilla's real destroy-progress tracking every time
+        // it did (confirmed live via BlockBreaker's own hitResult debug
+        // logging: realHitBlockPos flipped between the two toBreak
+        // blocks in lockstep with the bot's eye height swinging through
+        // the jump arc) -- a genuine chicken-and-egg deadlock: the jump
+        // can't succeed until the leaves are mined through, but the
+        // leaves can never finish breaking because the failed jump keeps
+        // the bot bouncing, which keeps breaking the aim needed to mine
+        // them. Holding off on the jump entirely until toBreak is
+        // actually clear lets the bot stand still (real onGround,
+        // constant eye height) long enough for HandsMineNode/
+        // BlockBreaker to actually finish, then jump cleanly once there's
+        // nothing left to break.
+        boolean stillNeedsDigging = waypoint != null && !waypoint.toBreak.isEmpty()
+                && waypoint.toBreak.stream().anyMatch(pos -> !ctx.level.getBlockState(pos).isAir());
+        // Ticks spent holding forward+sprint toward this waypoint, used to
+        // gate a requiresJump move's jump -- see SPRINT_RUNUP_TICKS' own
+        // docstring for the live "fires the jump the instant walking
+        // starts, falls short of a real running jump every time" bug this
+        // exists to fix. Deliberately NOT also gated on real measured
+        // horizontal speed (an earlier version of this fix required
+        // getDeltaMovement() to reach a minimum threshold too) -- reported
+        // live: the takeoff stance for the exact jump this was built for
+        // has effectively zero run-up room before the wall (real speed
+        // measured ~0 the entire approach, confirmed via this same
+        // diagnostic), so a real-speed requirement can never be satisfied
+        // there and permanently blocked the jump from ever firing at all
+        // -- worse than the original bug (that one at least attempted the
+        // jump). Per explicit direction (a live by-hand test confirming
+        // this jump IS makeable, but only while sprinting): what actually
+        // matters is holding the sprint key for real vanilla's own
+        // gradual sprint-speed ramp-up to take effect, not distance
+        // physically covered beforehand -- ticks-held is a correct proxy
+        // for that on its own.
+        boolean buildingRunup = walking && facingWaypoint && intent.forward && ctx.player.onGround();
+        int runupTicks = buildingRunup
+            ? (ctx.blackboard.get(SPRINT_RUNUP_TICKS) == null ? 0 : ctx.blackboard.get(SPRINT_RUNUP_TICKS)) + 1
+            : 0;
+        ctx.blackboard.put(SPRINT_RUNUP_TICKS, runupTicks);
+        boolean hasRunup = runupTicks >= SPRINT_RUNUP_TICKS_REQUIRED;
+        boolean requiresJumpSafeToFire = (!waypointRequiresJump || (facingWaypoint && hasRunup)) && !stillNeedsDigging;
+        boolean wantsToJump = walking && (dy > 0.1 || waypointRequiresJump) && !landingOnFarmland && requiresJumpSafeToFire;
+        if (wantsToJump) {
             intent.jump = true;
             intent.sprint = true;
         }
         if (walking && alwaysSprint) {
             intent.sprint = true;
+        }
+        // TEMPORARY DEBUG: sprint held for the entire walk, not just once
+        // a jump is about to fire -- per explicit direction, to check
+        // whether SPRINT_RUNUP_TICKS' own tick-counting is actually
+        // coinciding with a REAL held sprint the whole run-up (previously
+        // intent.sprint only went true on the same tick wantsToJump did,
+        // so the counter could reach SPRINT_RUNUP_TICKS_REQUIRED while the
+        // bot was still just walking, never actually sprinting, during
+        // the run-up itself). Remove once confirmed whether this is what
+        // was missing.
+        if (walking) {
+            intent.sprint = true;
+        }
+
+        // Temporary diagnostic, extended to cover the new run-up gating --
+        // still verifying the SPRINT_RUNUP_TICKS fix live against the
+        // exact jump it was built for. Throttled to every 10 ticks (0.5s).
+        // Intended to be removed once confirmed working; not gated behind
+        // isDebugEnabled() since this client's log4j config filters debug
+        // output entirely (see BlockBreaker's own per-tick diagnostic for
+        // the same reasoning).
+        if (walking && waypoint != null && ctx.player.tickCount % 10 == 0) {
+            MinebotMod.LOGGER.info(
+                "navigate[diag]: self=({}, {}, {}) waypoint=({}, {}, {}) requiresJump={} dy={} relativeYawIntent=[fwd={} back={} left={} right={}] facingWaypoint={} runupTicks={} hasRunup={} jump={} onGround={}",
+                selfX, selfY, selfZ, waypoint.x, waypoint.y, waypoint.z, waypointRequiresJump, dy,
+                intent.forward, intent.backward, intent.left, intent.right, facingWaypoint,
+                runupTicks, hasRunup, wantsToJump, ctx.player.onGround()
+            );
         }
 
         ctx.input.setIntent(intent);

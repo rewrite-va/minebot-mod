@@ -5,11 +5,16 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.DoorBlock;
+import net.minecraft.world.level.block.SnowLayerBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -47,17 +52,32 @@ import java.util.List;
  * unknown" is the safe default for a pathfinder whose whole point is not
  * falling through unseen gaps.
  *
- * Water/lava is walkable by default -- real vanilla liquids have no
- * collision box, so a liquid tile counts as `safe` the same as air, just
- * with a small +1.0 liquidCost nudge per move (getMoveForward/
- * getMoveDiagonal) discouraging it without forbidding it, so A* still
- * crosses a stream/pond when that's genuinely the shortest route.
- * avoidLiquid (false by default) overrides this per-instance: with it
- * set, liquid tiles are `!safe` instead, which safeOrBreak turns into a
- * hard BLOCKED for every move type at once (not just the two that add
- * liquidCost) -- see avoidLiquid's own field docstring for why
- * (Legs:FLEE routing INTO water while retreating is worse than a longer
- * dry detour).
+ * Water is walkable by default -- real vanilla liquids have no collision
+ * box, so a liquid tile counts as `safe` the same as air, just with a
+ * small +1.0 liquidCost nudge per move (getMoveForward/getMoveDiagonal)
+ * discouraging it without forbidding it, so A* still crosses a
+ * stream/pond when that's genuinely the shortest route. avoidLiquid
+ * (false by default) overrides this per-instance: with it set, liquid
+ * tiles are `!safe` instead, which safeOrBreak turns into a hard BLOCKED
+ * for every move type at once (not just the two that add liquidCost) --
+ * see avoidLiquid's own field docstring for why (Legs:FLEE routing INTO
+ * water while retreating is worse than a longer dry detour).
+ *
+ * Lava is the one liquid this doesn't apply to -- per explicit
+ * direction, it's never merely discouraged the way water is:
+ * BlockInfo.dangerous (computed in getBlock, folded into `safe`) marks
+ * it `!safe` unconditionally, same as avoidLiquid does for every liquid
+ * when set, so it's always routed around rather than crossed even when
+ * it'd be the shortest path. Magma block gets the same `dangerous`
+ * treatment despite being a real, normal full-block floor (`physical`
+ * stays true -- its actual collision shape is unchanged, so anything
+ * that needs to know "is this solid" still gets the right answer) --
+ * every move type that accepts a floor block for standing/landing
+ * (getMoveForward, getMoveJumpUp, getMoveDiagonal, getLandingBlock, the
+ * parkour landing loop) separately checks `dangerous` on that floor
+ * block specifically, since `safeOrBreak`'s own `safe` check only ever
+ * runs against body-space blocks (what a player's hitbox occupies), not
+ * the block stood on.
  *
  * Dig cost: movements.js's safeOrBreak computes a "labor cost" from an
  * estimated digTime looked up in a client-less registry dump (mineflayer
@@ -111,7 +131,7 @@ public final class Movements {
     // entirely from this port until found live: without it, getLandingBlock
     // happily returns a landing spot dozens of blocks straight down (the
     // first solid floor it finds, however far that is), and getMoveDown
-    // costs that as a flat ~1.0 (only safeOrBreak(block0) -- the single
+    // costs that as a flat ~1.0 (only safeOrBreak(node, block0) -- the single
     // block directly underfoot) with zero awareness that the real landing
     // is far below. The bot then walked exactly one dig at a time toward a
     // "waypoint" it could never actually reach on a single move: dig the
@@ -152,7 +172,7 @@ public final class Movements {
         BlockPos pos = new BlockPos(x, y, z);
 
         if (!level.isLoaded(pos)) {
-            return new BlockInfo(x, y, z, false, false, false, false, false, false, false, false);
+            return new BlockInfo(x, y, z, false, false, false, false, false, false, false, false, false);
         }
 
         BlockState state = level.getBlockState(pos);
@@ -160,6 +180,25 @@ public final class Movements {
         boolean isLiquid = !state.getFluidState().isEmpty();
         boolean isLadder = state.getBlock().builtInRegistryHolder().is(BlockTags.CLIMBABLE);
         boolean isFullBlock = state.isCollisionShapeFullBlock(EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
+        // Lava is a real liquid (getFluidState() is non-empty, same as
+        // water) but, unlike water, touching it is lethal -- per explicit
+        // direction, never treat it as merely "discouraged" the way
+        // water's own +1.0 liquidCost nudge does (see class docstring on
+        // avoidLiquid). Checked via the fluid state's own tag rather than
+        // BlockTags.LAVA (a block tag), since a flowing-lava tile's block
+        // is still Blocks.LAVA either way here -- FluidTags mirrors this
+        // 1:1 for the vanilla fluids, but asking the fluid state directly
+        // is the same check state.is(Blocks.LAVA) would do, minus having
+        // to separately account for both the source and flowing variants.
+        boolean isLava = state.getFluidState().is(net.minecraft.tags.FluidTags.LAVA);
+        // Magma block has a real, normal full-block collision shape --
+        // isFullBlock/isSolid below both correctly say "yes, you can
+        // stand on this" -- but standing on it deals real damage
+        // (MagmaBlock.stepOn) unless the player has Frost Walker, which
+        // this mod doesn't try to detect/require. A geometrically valid
+        // landing surface that's still not a safe one to route onto.
+        boolean isMagma = state.is(Blocks.MAGMA_BLOCK);
+        boolean isDangerous = isLava || isMagma;
 
         // Stairs and slabs aren't a full-block collision shape
         // (isCollisionShapeFullBlock is false for both), but a real player
@@ -221,9 +260,54 @@ public final class Movements {
         // feeds into safeOrBreak (every move type), not just the
         // separate +1.0 liquidCost nudge getMoveForward/getMoveDiagonal
         // already apply when it's merely discouraged, not disallowed.
-        boolean safe = (isAir || isLadder || isLiquid || isDoor) && !(avoidLiquid && isLiquid);
+        //
+        // movements.js's own `carpet` case (a thin, walk-through decorative
+        // block) was never ported here -- this port's closest real
+        // equivalent, a shallow snow layer, fell through to safeOrBreak's
+        // dig-cost path instead, exactly like a genuine solid obstacle.
+        // Reported live: a bot standing on solid ground with a walkable
+        // 1-4-layer snow accumulation in its path got misplanned as
+        // "needs digging" for that step -- real vanilla lets a player walk
+        // straight through up to 4 layers with zero collision at all
+        // (SnowLayerBlock.isPathfindable checks LAYERS < HEIGHT_IMPASSABLE,
+        // confirmed via decompiled source: HEIGHT_IMPASSABLE == 5), so
+        // charging a dig cost (and, worse, ever attempting to actually
+        // mine it) for something a real player would simply walk over is
+        // wrong on both fronts. 5+ layers genuinely does block movement
+        // (isPathfindable returns false there), so this only counts as
+        // safe below that same real vanilla threshold, not unconditionally
+        // for every snow layer state.
+        boolean isWalkableSnow = state.getBlock() instanceof SnowLayerBlock
+            && state.getValue(SnowLayerBlock.LAYERS) < SnowLayerBlock.HEIGHT_IMPASSABLE;
+        // Real collision shape at the ACTUAL position (not
+        // EmptyBlockGetter.INSTANCE the way isFullBlock above asks --
+        // that generic query is fine for "is this a full cube", but
+        // getCollisionShape can depend on real neighbor context, so
+        // asking at the real pos is the more correct query for "does
+        // this block have any collision AT ALL"), general-purpose
+        // equivalent of the walkable-snow special case just above --
+        // covers every decorative/vegetation block with zero collision
+        // (leaf litter, flowers, flower beds, petals, tall grass,
+        // saplings, etc.) the same way, rather than hardcoding a
+        // per-block-type list. Reported live: leaf litter (and, by the
+        // same real-vanilla mechanism, flowers/petals) has zero
+        // collision -- a real player walks straight through it exactly
+        // like air -- but wasn't air, a liquid, a ladder, a door, or the
+        // one hardcoded SnowLayerBlock case above, so it fell through to
+        // the same `!safe` obstacle bucket as an actual wall: routed
+        // around, or queued up as something to dig through, when a real
+        // player would just walk over it without even noticing it was
+        // there. Matches this class's own isWalkableSnow reasoning
+        // exactly (see its docstring just above) -- generalized from one
+        // hardcoded block to "any block with a real empty collision
+        // shape", the same test vanilla's own WalkNodeEvaluator-style
+        // pathfinding uses to tell a walk-through decoration apart from
+        // a real obstacle.
+        boolean hasNoCollision = !isAir && state.getCollisionShape(level, pos).isEmpty();
+        boolean safe = (isAir || isLadder || isLiquid || isDoor || isWalkableSnow || hasNoCollision)
+            && !(avoidLiquid && isLiquid) && !isDangerous;
 
-        return new BlockInfo(x, y, z, true, safe, isSolid, isLiquid, isLadder, isDoor, closedDoor, hasLoweredTopSurface);
+        return new BlockInfo(x, y, z, true, safe, isSolid, isLiquid, isLadder, isDoor, closedDoor, hasLoweredTopSurface, isDangerous);
     }
 
     private BlockInfo getBlock(final BlockInfo origin, final int dx, final int dy, final int dz) {
@@ -242,8 +326,26 @@ public final class Movements {
      * always used for unknown blocks. Appends `pos` to `toBreak` whenever
      * it decides digging is the way through, exactly like movements.js's
      * own `toBreak.push`.
+     *
+     * `stance` is the real position the bot would actually be standing at
+     * WHILE digging `block` -- needed for the hasDigLineOfSight check
+     * below (see its own docstring for why this can't just be planned as
+     * generically diggable without it). Reported live: A* happily planned
+     * a jump-up move whose own headroom obstruction sat diagonally behind
+     * the bot's real standing position -- genuinely diggable in the
+     * abstract (real positive destroySpeed, not a chest/farmland/bedrock
+     * exclusion), but BlockBreaker's own real per-tick raycast could never
+     * actually land on it from that stance, so the bot got stuck holding
+     * keyAttack at a target it could never hit, forever (confirmed live:
+     * "no line of sight" logged every single tick with no way out --
+     * BlockBreaker's own docstring already flagged "the caller is
+     * responsible for eventually giving up on a target that never becomes
+     * visible", but the real fix is not planning through it in the first
+     * place, matching how a real player scouting the route would notice
+     * "I can't actually reach that block" and route around it instead of
+     * committing to a path that dead-ends).
      */
-    private double safeOrBreak(final BlockInfo block, final List<BlockPos> toBreak) {
+    private double safeOrBreak(final Move stance, final BlockInfo block, final List<BlockPos> toBreak) {
         if (!block.known) {
             return BLOCKED;
         }
@@ -290,6 +392,10 @@ public final class Movements {
             return BLOCKED; // held tool (or bare hands) can never break this
         }
 
+        if (!hasDigLineOfSight(stance, pos)) {
+            return BLOCKED; // real BlockBreaker execution could never actually hit this from here -- see this method's own docstring
+        }
+
         toBreak.add(pos);
         // movements.js: laborCost = (1 + 3 * digTime/1000) * digCost, where
         // digTime is estimated in ms. Real per-tick progress gives an exact
@@ -301,6 +407,65 @@ public final class Movements {
         double ticksNeeded = 1.0 / progressPerTick;
         double digTimeMillis = ticksNeeded * 50.0;
         return (1.0 + 3.0 * digTimeMillis / 1000.0) * DIG_COST;
+    }
+
+    // Sample points on the target block, tried in order until one has
+    // clear line of sight -- mirrors BlockBreaker.SIGHT_SAMPLE_OFFSETS
+    // exactly (not shared -- see that field's own comment on this
+    // codebase's established precedent of keeping short raycasts local),
+    // since this check's whole point is predicting whether BlockBreaker's
+    // OWN real execution-time hasLineOfSight would succeed from this
+    // stance -- using a different sampling strategy here would make this
+    // check answer a different question than the one that actually
+    // matters.
+    private static final double[][] DIG_SIGHT_SAMPLE_OFFSETS = {
+        {0.5, 0.5, 0.5}, {0.5, 0.9, 0.5}, {0.5, 0.1, 0.5}, {0.1, 0.5, 0.5}, {0.9, 0.5, 0.5}, {0.5, 0.5, 0.1}, {0.5, 0.5, 0.9},
+    };
+
+    /**
+     * Whether a real player standing at `stance` (a planned Move node --
+     * the actual position the bot will be occupying while digging, not
+     * necessarily its own live current position, since this runs during
+     * A* exploration of hypothetical future nodes) could actually land a
+     * real crosshair hit on `pos` -- see safeOrBreak's own docstring for
+     * why this exists at all. Synthesizes an eye position from `stance`'s
+     * integer coordinates + LocalPlayer.getEyeHeight() (the same real
+     * standing eye-height vanilla itself uses, rather than a hardcoded
+     * 1.62 constant, so this stays correct even if eye height ever
+     * differs, e.g. while sneaking) since `stance` is a hypothetical
+     * position, not the bot's own real live Entity with a real
+     * getEyePosition() to call.
+     */
+    private boolean hasDigLineOfSight(final Move stance, final BlockPos pos) {
+        Vec3 from = new Vec3(stance.x + 0.5, stance.y + player.getEyeHeight(), stance.z + 0.5);
+        for (double[] offset : DIG_SIGHT_SAMPLE_OFFSETS) {
+            Vec3 to = new Vec3(pos.getX() + offset[0], pos.getY() + offset[1], pos.getZ() + offset[2]);
+            BlockHitResult hit = level.clip(new ClipContext(from, to, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player));
+            // Must actually HIT `pos` itself -- a real MISS (the ray sails
+            // past the sample point without hitting anything solid at
+            // all, which can genuinely happen at a corner/edge sample
+            // against a block whose real collision outline doesn't fully
+            // cover that offset point) does NOT mean BlockBreaker's own
+            // real crosshair could land a hit there; it means nothing
+            // blocked the ray, not that anything caught it either.
+            // Reported live: an earlier version of this check treated
+            // MISS as success too, over-approving digs BlockBreaker's own
+            // stricter execution-time hasLineOfSight (BLOCK type AND a
+            // matching position, never MISS) then consistently failed to
+            // find, leaving the bot stuck "no line of sight" forever
+            // despite planning having "verified" visibility. Matching
+            // BlockBreaker's exact criterion here, not a looser one, is
+            // the whole point of this check -- see its own docstring.
+            if (hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(pos)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** `node`'s own position as a BlockPos, for Move's own digStance field -- null when `toBreak` ends up empty (nothing to stand anywhere for), matching digStance's own "null whenever toBreak is empty" contract (see Move's own docstring). */
+    private static BlockPos digStanceFor(final Move node, final List<BlockPos> toBreak) {
+        return toBreak.isEmpty() ? null : new BlockPos(node.x, node.y, node.z);
     }
 
     /**
@@ -335,17 +500,20 @@ public final class Movements {
         if (!blockD.physical && !blockC.liquid) {
             return null; // would need to place a block to fill the gap -- can't place
         }
+        if (blockD.physical && blockD.dangerous) {
+            return null; // real floor, but standing on it (magma block) hurts -- see getLandingBlock's own dangerous check
+        }
 
-        cost += safeOrBreak(blockB, toBreak);
+        cost += safeOrBreak(node, blockB, toBreak);
         if (cost > BLOCKED) return null;
-        cost += safeOrBreak(blockC, toBreak);
+        cost += safeOrBreak(node, blockC, toBreak);
         if (cost > BLOCKED) return null;
 
         if (getBlock(node, 0, 0, 0).liquid) {
             cost += 1.0; // liquidCost
         }
 
-        return new Move(blockC.x, blockC.y, blockC.z, cost, toBreak);
+        return new Move(blockC.x, blockC.y, blockC.z, cost, toBreak, false, digStanceFor(node, toBreak));
     }
 
     public Move getMoveJumpUp(final Move node, final int dx, final int dz) {
@@ -360,6 +528,9 @@ public final class Movements {
         if (!blockC.physical) {
             return null; // would need to place a block to stand on -- can't place
         }
+        if (blockC.dangerous) {
+            return null; // real floor, but standing on it (magma block) hurts -- see getLandingBlock's own dangerous check
+        }
 
         BlockInfo block0 = getBlock(node, 0, -1, 0);
         double stepHeight = blockC.height() - block0.height();
@@ -368,14 +539,14 @@ public final class Movements {
         }
         cost += jumpHeightPenalty(stepHeight);
 
-        cost += safeOrBreak(blockA, toBreak);
+        cost += safeOrBreak(node, blockA, toBreak);
         if (cost > BLOCKED) return null;
-        cost += safeOrBreak(blockH, toBreak);
+        cost += safeOrBreak(node, blockH, toBreak);
         if (cost > BLOCKED) return null;
-        cost += safeOrBreak(blockB, toBreak);
+        cost += safeOrBreak(node, blockB, toBreak);
         if (cost > BLOCKED) return null;
 
-        return new Move(blockB.x, blockB.y, blockB.z, cost, toBreak);
+        return new Move(blockB.x, blockB.y, blockB.z, cost, toBreak, true, digStanceFor(node, toBreak));
     }
 
     public Move getMoveDiagonal(final Move node, final int dx, final int dz) {
@@ -392,10 +563,10 @@ public final class Movements {
         BlockInfo blockB1 = getBlock(node, 0, y + 1, dz);
         BlockInfo blockC1 = getBlock(node, 0, y, dz);
         BlockInfo blockD1 = getBlock(node, 0, y - 1, dz);
-        cost1 += safeOrBreak(blockB1, toBreak1);
-        cost1 += safeOrBreak(blockC1, toBreak1);
+        cost1 += safeOrBreak(node, blockB1, toBreak1);
+        cost1 += safeOrBreak(node, blockC1, toBreak1);
         if (blockD1.height() - block0.height() > MAX_STEP_HEIGHT) {
-            cost1 += safeOrBreak(blockD1, toBreak1);
+            cost1 += safeOrBreak(node, blockD1, toBreak1);
         }
 
         double cost2 = 0.0;
@@ -403,10 +574,10 @@ public final class Movements {
         BlockInfo blockB2 = getBlock(node, dx, y + 1, 0);
         BlockInfo blockC2 = getBlock(node, dx, y, 0);
         BlockInfo blockD2 = getBlock(node, dx, y - 1, 0);
-        cost2 += safeOrBreak(blockB2, toBreak2);
-        cost2 += safeOrBreak(blockC2, toBreak2);
+        cost2 += safeOrBreak(node, blockB2, toBreak2);
+        cost2 += safeOrBreak(node, blockC2, toBreak2);
         if (blockD2.height() - block0.height() > MAX_STEP_HEIGHT) {
-            cost2 += safeOrBreak(blockD2, toBreak2);
+            cost2 += safeOrBreak(node, blockD2, toBreak2);
         }
 
         if (cost1 < cost2) {
@@ -418,9 +589,9 @@ public final class Movements {
         }
         if (cost > BLOCKED) return null;
 
-        cost += safeOrBreak(getBlock(node, dx, y, dz), toBreak);
+        cost += safeOrBreak(node, getBlock(node, dx, y, dz), toBreak);
         if (cost > BLOCKED) return null;
-        cost += safeOrBreak(getBlock(node, dx, y + 1, dz), toBreak);
+        cost += safeOrBreak(node, getBlock(node, dx, y + 1, dz), toBreak);
         if (cost > BLOCKED) return null;
 
         if (getBlock(node, 0, 0, 0).liquid) {
@@ -429,22 +600,32 @@ public final class Movements {
 
         BlockInfo blockD = getBlock(node, dx, -1, dz);
         if (y == 1) { // stepping up by 1 while moving diagonally
+            if (blockC.dangerous) {
+                return null; // real floor, but standing on it (magma block) hurts -- see getLandingBlock's own dangerous check
+            }
             double stepHeight = blockC.height() - block0.height();
             if (stepHeight > MAX_STEP_HEIGHT) {
                 return null;
             }
             cost += jumpHeightPenalty(stepHeight);
-            cost += safeOrBreak(getBlock(node, 0, 2, 0), toBreak);
+            cost += safeOrBreak(node, getBlock(node, 0, 2, 0), toBreak);
             if (cost > BLOCKED) return null;
             cost += 1.0;
-            return new Move(blockC.x, blockC.y + 1, blockC.z, cost, toBreak);
+            return new Move(blockC.x, blockC.y + 1, blockC.z, cost, toBreak, false, digStanceFor(node, toBreak));
         } else if (blockD.physical || blockC.liquid) {
-            return new Move(blockC.x, blockC.y, blockC.z, cost, toBreak);
+            if (blockD.physical && blockD.dangerous) {
+                return null; // real floor, but standing on it (magma block) hurts -- see getLandingBlock's own dangerous check
+            }
+            return new Move(blockC.x, blockC.y, blockC.z, cost, toBreak, false, digStanceFor(node, toBreak));
         } else if (getBlock(node, dx, -2, dz).physical || blockD.liquid) {
             if (!blockD.safe) {
                 return null; // don't self-immolate (e.g. drop into lava)
             }
-            return new Move(blockC.x, blockC.y - 1, blockC.z, cost, toBreak);
+            BlockInfo blockE = getBlock(node, dx, -2, dz);
+            if (blockE.physical && blockE.dangerous) {
+                return null; // real floor, but standing on it (magma block) hurts -- see getLandingBlock's own dangerous check
+            }
+            return new Move(blockC.x, blockC.y - 1, blockC.z, cost, toBreak, false, digStanceFor(node, toBreak));
         }
         return null;
     }
@@ -475,6 +656,14 @@ public final class Movements {
             if (blockLand.liquid && blockLand.safe) {
                 return blockLand;
             }
+            if (blockLand.physical && blockLand.dangerous) {
+                // A real solid floor (magma block) that still hurts to
+                // stand on -- geometrically a valid landing, but not a
+                // safe one to route onto. Refuse it exactly like an unsafe
+                // liquid below does, rather than accepting the first solid
+                // surface found regardless of what it is.
+                return null;
+            }
             if (blockLand.physical) {
                 if (node.y - blockLand.y > MAX_DROP_DOWN) {
                     return null; // floor exists, but it's too far below to drop to in one move
@@ -502,18 +691,18 @@ public final class Movements {
             return null;
         }
 
-        cost += safeOrBreak(blockB, toBreak);
+        cost += safeOrBreak(node, blockB, toBreak);
         if (cost > BLOCKED) return null;
-        cost += safeOrBreak(blockC, toBreak);
+        cost += safeOrBreak(node, blockC, toBreak);
         if (cost > BLOCKED) return null;
-        cost += safeOrBreak(blockD, toBreak);
+        cost += safeOrBreak(node, blockD, toBreak);
         if (cost > BLOCKED) return null;
 
         if (blockC.liquid) {
             return null; // don't go underwater
         }
 
-        return new Move(blockLand.x, blockLand.y, blockLand.z, cost, toBreak);
+        return new Move(blockLand.x, blockLand.y, blockLand.z, cost, toBreak, false, digStanceFor(node, toBreak));
     }
 
     public Move getMoveDown(final Move node) {
@@ -527,14 +716,14 @@ public final class Movements {
             return null;
         }
 
-        cost += safeOrBreak(block0, toBreak);
+        cost += safeOrBreak(node, block0, toBreak);
         if (cost > BLOCKED) return null;
 
         if (getBlock(node, 0, 0, 0).liquid) {
             return null; // don't go underwater
         }
 
-        return new Move(blockLand.x, blockLand.y, blockLand.z, cost, toBreak);
+        return new Move(blockLand.x, blockLand.y, blockLand.z, cost, toBreak, false, digStanceFor(node, toBreak));
     }
 
     public Move getMoveUp(final Move node) {
@@ -547,14 +736,14 @@ public final class Movements {
 
         double cost = 1.0;
         List<BlockPos> toBreak = new ArrayList<>();
-        cost += safeOrBreak(block2, toBreak);
+        cost += safeOrBreak(node, block2, toBreak);
         if (cost > BLOCKED) return null;
 
         if (!block1.climbable) {
             return null; // can only climb via a ladder/vine -- no 1x1 towering, which needs placing
         }
 
-        return new Move(node.x, node.y + 1, node.z, cost, toBreak);
+        return new Move(node.x, node.y + 1, node.z, cost, toBreak, false, digStanceFor(node, toBreak));
     }
 
     public List<Move> getMoveParkourForward(final Move node, final int dx, final int dz) {
@@ -603,10 +792,10 @@ public final class Movements {
             BlockInfo blockC = getBlock(node, ddx, 0, ddz);
             BlockInfo blockD = getBlock(node, ddx, -1, ddz);
 
-            if (ceilingClear && blockB.safe && blockC.safe && blockD.physical) {
-                moves.add(new Move(blockC.x, blockC.y, blockC.z, cost));
+            if (ceilingClear && blockB.safe && blockC.safe && blockD.physical && !blockD.dangerous) {
+                moves.add(new Move(blockC.x, blockC.y, blockC.z, cost, true));
                 break;
-            } else if (ceilingClear && blockB.safe && blockC.physical) {
+            } else if (ceilingClear && blockB.safe && blockC.physical && !blockC.dangerous) {
                 if (blockA.safe && d != 4) { // 4-forward-1-up is very difficult and fails often
                     double stepHeight = blockC.height() - block0.height();
                     if (stepHeight > MAX_STEP_HEIGHT) {
@@ -617,13 +806,13 @@ public final class Movements {
                     // harder to land than a plain step-up of the same
                     // height, so the same escalating-near-the-cap penalty
                     // applies here too (see jumpHeightPenalty's docstring).
-                    moves.add(new Move(blockB.x, blockB.y, blockB.z, cost + jumpHeightPenalty(stepHeight)));
+                    moves.add(new Move(blockB.x, blockB.y, blockB.z, cost + jumpHeightPenalty(stepHeight), true));
                     break;
                 }
             } else if ((ceilingClear || d == 2) && blockB.safe && blockC.safe && blockD.safe && floorCleared) {
                 BlockInfo blockE = getBlock(node, ddx, -2, ddz);
-                if (blockE.physical) {
-                    moves.add(new Move(blockD.x, blockD.y, blockD.z, cost));
+                if (blockE.physical && !blockE.dangerous) {
+                    moves.add(new Move(blockD.x, blockD.y, blockD.z, cost, true));
                 }
                 floorCleared = floorCleared && !blockE.physical;
             } else if (!blockB.safe || !blockC.safe) {

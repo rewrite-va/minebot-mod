@@ -126,6 +126,20 @@ public final class PathTracker {
 
         Movements movements = new Movements(level, player);
         movements.avoidLiquid = avoidLiquid;
+        // Digging disabled unconditionally -- per explicit direction,
+        // mining-through-obstacles pathfinding was a persistent, hard-to-
+        // fix source of stuck bots (bounce loops between jump/mine states,
+        // permanently-unreachable dig stances with no line of sight,
+        // waypoints that could hold the bot forever with no exclusion
+        // mechanism to route around a bad one -- see this file's own git
+        // history and BlockBreaker/HandsMineNode's docstrings for the
+        // full chain of live-reported bugs this caused), and a real
+        // walkable route without digging is available essentially always
+        // in practice. Movements.allowDig already existed and safeOrBreak
+        // already respects it (returns BLOCKED for any non-safe block
+        // instead of coring a dig cost) -- just never had a caller opt in
+        // until now.
+        movements.allowDig = false;
         Move start = new Move(startX, startY, startZ, 0.0);
         GoalNear goal = new GoalNear(targetX, targetY, targetZ, stopDistance);
         AStar astar = new AStar(start, movements::getNeighbors, goal::heuristic, goal::isEnd, PATHFINDING_TIMEOUT_MILLIS);
@@ -197,14 +211,36 @@ public final class PathTracker {
      * fine (real per-tick Y jitter while walking is tiny, nothing like a
      * jump arc's swing).
      */
-    public Move nextWaypoint(final double selfX, final double selfY, final double selfZ, final boolean onGround) {
+    /**
+     * `level` is used only to double-check a waypoint carrying a real
+     * toBreak list (see Move's own docstring) hasn't been popped as
+     * "reached" while any of its blocks are still solid -- reported live:
+     * the X/Z/Y proximity check alone doesn't know digging is even
+     * involved, so a bot standing right under a jump-up waypoint's own
+     * column (X/Z already matching, only Y still off because the jump
+     * keeps failing) got that SAME waypoint popped off as reached the
+     * instant Y drifted within tolerance mid-jump-arc, before the leaves
+     * blocking it were actually broken through. The next tick's replan
+     * then re-derived the identical jump move with toBreak populated
+     * again from scratch (A* doesn't remember partial mining progress
+     * either), HandsMineNode's own MINE state exited and re-entered
+     * (WAYPOINT_TO_BREAK genuinely went empty then non-empty again), and
+     * BlockBreaker's real destroy progress reset to zero every single
+     * cycle (its own class docstring already documents why any target
+     * switch does this) -- neither leaf block ever finished breaking, a
+     * real self-sustaining stuck loop. A waypoint with a non-empty
+     * toBreak is now only ever "reached" once ALL its listed blocks are
+     * confirmed air, regardless of how closely X/Y/Z otherwise match.
+     */
+    public Move nextWaypoint(final ClientLevel level, final double selfX, final double selfY, final double selfZ, final boolean onGround) {
         double yTolerance = onGround ? 1.0 : 0.1;
         while (!currentPath.isEmpty()) {
             Move waypoint = currentPath.peekFirst();
-            boolean reached = Math.floor(selfX) == waypoint.x
+            boolean positionReached = Math.floor(selfX) == waypoint.x
                 && Math.floor(selfZ) == waypoint.z
                 && Math.abs(selfY - waypoint.y) < yTolerance;
-            if (!reached) {
+            boolean diggingDone = waypoint.toBreak.stream().allMatch(pos -> level.getBlockState(pos).isAir());
+            if (!positionReached || !diggingDone) {
                 return waypoint;
             }
             currentPath.pollFirst();

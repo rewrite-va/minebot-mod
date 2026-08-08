@@ -12,6 +12,7 @@ import net.minecraft.core.registries.Registries;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.arrow.AbstractArrow;
 import net.minecraft.world.item.BowItem;
 import net.minecraft.world.item.ItemStack;
@@ -271,37 +272,45 @@ public final class LegsPickupItemsNode implements StateNode<LegsState> {
      *   being real synced entity data (unlike pickup/firedFromWeapon
      *   below) -- reached via AbstractArrowAccessor, a one-method Mixin
      *   @Invoker (see its own docstring).
-     * - getOwner() must resolve to the bot's own LocalPlayer. Ownership
-     *   itself isn't SynchedEntityData either, but it IS packed into the
-     *   entity's spawn packet (Projectile.getAddEntityPacket) and
-     *   resolved client-side on receipt (recreateFromPacket) -- so
-     *   getOwner() reliably distinguishes "the bot fired this" from
-     *   "anyone/anything else fired this" (a skeleton's arrows resolve to
-     *   the skeleton, never the bot, so they're excluded for free, no
-     *   separate skeleton-check needed). Arrows whose owner didn't
-     *   resolve (not loaded at spawn time) are excluded too, erring
-     *   toward "don't chase it" over risking a real DISALLOWED pickup.
+     * - getOwner() must resolve to SOME Player -- the bot's own LocalPlayer
+     *   OR any other player. Ownership itself isn't SynchedEntityData
+     *   either, but it IS packed into the entity's spawn packet
+     *   (Projectile.getAddEntityPacket) and resolved client-side on
+     *   receipt (recreateFromPacket) -- so getOwner() reliably
+     *   distinguishes "some player fired this" from "anything else fired
+     *   this" (a skeleton's arrows resolve to the skeleton, never a
+     *   Player, so they're excluded for free, no separate skeleton-check
+     *   needed). Arrows whose owner didn't resolve (not loaded at spawn
+     *   time) are excluded too, erring toward "don't chase it" over
+     *   risking a real DISALLOWED pickup. Widened from "bot's own
+     *   LocalPlayer only" per explicit direction -- vanilla's real
+     *   Pickup.ALLOWED rule already lets any player grab an arrow fired by
+     *   any other player, this just matches that.
      * - Infinity-fired arrows get CREATIVE_ONLY server-side, not pickable
      *   in survival -- that flag isn't observable on the arrow itself
-     *   either, but since only the bot's OWN shots pass the getOwner()
-     *   check above, this is answerable by asking the bot's own
-     *   inventory instead: if the bot carries ANY Infinity-enchanted bow
-     *   at all, conservatively treat every one of its own ground arrows
-     *   as not worth chasing -- there's no way to tell after the fact
-     *   which specific bow fired a given already-landed arrow, so this
-     *   errs toward "don't chase it" rather than risking a real
+     *   either. Only checkable for the BOT's own shots, by asking the
+     *   bot's own inventory: if the bot carries ANY Infinity-enchanted bow
+     *   at all, conservatively treat every one of the bot's OWN ground
+     *   arrows as not worth chasing -- there's no way to tell after the
+     *   fact which specific bow fired a given already-landed arrow, so
+     *   this errs toward "don't chase it" rather than risking a real
      *   CREATIVE_ONLY (unpickable in survival) target. Bare hands/no bow
      *   carried at all means every own-arrow is presumed a normal shot.
+     *   Other players' Infinity bows aren't observable at all (their
+     *   inventory isn't client-visible the way the bot's own is) -- their
+     *   arrows are always treated as pickable, same as vanilla can't be
+     *   second-guessed here either way.
      */
     private static boolean isArrowPickable(final TickContext ctx, final AbstractArrow arrow) {
         if (!((AbstractArrowAccessor) arrow).invokeIsInGround()) {
             return false;
         }
         Entity owner = arrow.getOwner();
-        if (owner == null || owner.getId() != ctx.player.getId()) {
+        if (!(owner instanceof Player)) {
             return false;
         }
-        return !carriesInfinityBow(ctx);
+        boolean isOwnArrow = owner.getId() == ctx.player.getId();
+        return !isOwnArrow || !carriesInfinityBow(ctx);
     }
 
     private static boolean carriesInfinityBow(final TickContext ctx) {

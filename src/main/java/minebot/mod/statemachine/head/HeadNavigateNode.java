@@ -18,6 +18,26 @@ import net.minecraft.world.phys.Vec3;
  * published value is deliberately the raw block position, not a
  * pre-offset point -- see WAYPOINT_COORDINATES' own docstring).
  *
+ * Briefly tried aiming one waypoint further out (ctx.pathTracker.
+ * lookaheadWaypoint()) for a steadier, more anticipatory-looking head
+ * turn -- reverted after it broke jumping: LegsNavigateNode's own
+ * requiresJumpSafeToFire gates a requiresJump move's jump input on
+ * facingWaypoint, which compares the CURRENT waypoint's own direction
+ * against ctx.player.getYRot() (see its own docstring for exactly why).
+ * That comparison implicitly assumes Head is aiming at the SAME waypoint
+ * Legs is walking toward -- once Head aimed one waypoint further ahead
+ * instead, the two could disagree by more than the ±67.5 degree cone on
+ * any path with a real turn in it (confirmed live: a winding 21-waypoint
+ * climb), so facingWaypoint stayed false forever, requiresJumpSafeToFire
+ * never fired, and the bot was stuck bumping into the same block face
+ * over and over -- the "moving back and forth, never actually
+ * progressing" pattern this reverts. A correct lookahead-look feature
+ * would need Legs' own jump gating to stop depending on Head's real yaw
+ * at all (compare against the current waypoint's own direction directly
+ * instead of ctx.player.getYRot()) -- not attempted here, since the look
+ * smoothness this bought wasn't worth reintroducing that whole class of
+ * bug for.
+ *
  * Falls back to NavIntent.NAV_TARGET (the raw target whichever
  * PlayerIntention node is currently active published) whenever there's no real waypoint
  * to face -- e.g. no path found, or close enough that the planned path

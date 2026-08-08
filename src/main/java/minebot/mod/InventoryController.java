@@ -25,6 +25,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.component.ItemAttributeModifiers;
 import net.minecraft.world.item.equipment.Equippable;
+import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -541,6 +542,95 @@ public final class InventoryController {
             moveToHotbar(player, choice.slot(), Inventory.isHotbarSlot(choice.slot()) ? choice.slot() : 8);
         }
         return choice.item();
+    }
+
+    // ---- Tool selection (extracted from BlockBreaker's own maybeSwitchToBestTool) ----
+
+    /** Where the best real tool-to-mine-`block`-with came from, and the real stack itself -- mirrors FoodChoice's own shape (slot + item identity), used by HandsMineNode/BlockBreaker the same "find, then act" way selectFood is used for eating. */
+    public record ToolChoice(int slot, ItemStack stack) {
+    }
+
+    /**
+     * Returns the best real tool in the hotbar/main inventory (slots 0-35
+     * -- armor/offhand slots 36-42 excluded, same reasoning findBestWeapon
+     * already applies: swapping a chestplate into the hotbar to mine with
+     * makes no sense) to break `state` with, or null if nothing carried
+     * beats what's already selected. Pure query, no mutation -- same
+     * find-vs-act split as findBestWeapon/findBestFood (see their own
+     * docstrings); selectTool below is the paired convenience that also
+     * calls moveToHotbar.
+     *
+     * Ranks candidates by real ItemStack.getDestroySpeed(state) (the same
+     * per-item mining-speed value BlockState.getDestroyProgress itself
+     * reads internally, confirmed via decompiled BlockBehaviour source),
+     * but -- unlike the version this replaces (BlockBreaker's own
+     * maybeSwitchToBestTool, which scored raw speed alone) -- a candidate
+     * that would break the block without actually producing its drops
+     * (ItemStack.isCorrectToolForDrops(state) false, while the block
+     * itself requires the correct tool at all -- BlockState.
+     * requiresCorrectToolForDrops(), confirmed via decompiled source
+     * these are two entirely independent questions, not implied by each
+     * other) is excluded whenever a real correct-tool candidate exists.
+     * Reported live: a faster but WRONG tool (e.g. an enchanted sword
+     * scoring higher raw speed than a plain pickaxe against some blocks)
+     * could win the old raw-speed-only comparison, breaking the block
+     * quickly but producing no drop at all -- exactly the same class of
+     * bug as mining with bare hands, just less obviously wrong from the
+     * log alone (the break visibly "succeeds"). A wrong-tool candidate is
+     * only ever considered if NO correct-tool candidate exists at all
+     * (better to break it fast with the wrong tool than not break it), and
+     * blocks that don't require a correct tool to begin with (state.
+     * requiresCorrectToolForDrops() false -- dirt, wood, etc.) are
+     * unaffected either way, matching real vanilla exactly.
+     *
+     * Bare hands (or an empty/no-beats-it selection) is never preferred
+     * over holding literally anything -- same -1 starting-baseline
+     * reasoning findBestWeapon/the old maybeSwitchToBestTool already
+     * established (see their own comments): forcing the baseline down
+     * whenever nothing is currently selected means the very first real
+     * candidate found always counts as strictly better.
+     */
+    public static ToolChoice findBestTool(final Player player, final BlockState state) {
+        ToolChoice correct = findBestTool(player, state, true);
+        return correct != null ? correct : findBestTool(player, state, false);
+    }
+
+    private static ToolChoice findBestTool(final Player player, final BlockState state, final boolean requireCorrectTool) {
+        boolean mustBeCorrect = requireCorrectTool && state.requiresCorrectToolForDrops();
+        Inventory inventory = player.getInventory();
+        int selectedSlot = inventory.getSelectedSlot();
+        ItemStack selectedStack = inventory.getItem(selectedSlot);
+        boolean selectedQualifies = !selectedStack.isEmpty() && (!mustBeCorrect || selectedStack.isCorrectToolForDrops(state));
+        int bestSlot = -1;
+        ItemStack bestStack = selectedStack;
+        float bestSpeed = selectedQualifies ? selectedStack.getDestroySpeed(state) : -1.0f;
+
+        for (int slot = 0; slot < 36; slot++) {
+            ItemStack stack = inventory.getItem(slot);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            if (mustBeCorrect && !stack.isCorrectToolForDrops(state)) {
+                continue;
+            }
+            float speed = stack.getDestroySpeed(state);
+            if (speed > bestSpeed) {
+                bestSpeed = speed;
+                bestSlot = slot;
+                bestStack = stack;
+            }
+        }
+
+        return bestSlot >= 0 ? new ToolChoice(bestSlot, bestStack) : null;
+    }
+
+    /** findBestTool(player, state), then moveToHotbar if it found something -- the paired "find, then act" convenience (see findBestWeapon's own docstring for why some callers want the Choice alone instead). Returns the resulting ToolChoice (null if nothing carried beats what's already selected), same shape selectWeapon returns its Choice. */
+    public static ToolChoice selectTool(final LocalPlayer player, final BlockState state) {
+        ToolChoice choice = findBestTool(player, state);
+        if (choice != null) {
+            moveToHotbar(player, choice.slot(), 8);
+        }
+        return choice;
     }
 
     // ---- Always-on auto-equip-armor (from the deleted AutoEquipArmor) ----

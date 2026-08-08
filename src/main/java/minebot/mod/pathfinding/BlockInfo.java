@@ -21,11 +21,22 @@ public final class BlockInfo {
     public final boolean door; // a hand-openable door, open or closed
     public final boolean closedDoor; // a hand-openable door currently blocking this space
     public final boolean stairsOrSlab; // walkable like a full block, but its real top surface can sit up to 0.5 lower -- see height()'s own docstring
+    // A block that hurts the player just by touching/standing on it --
+    // lava, magma block -- as opposed to merely being a solid obstacle.
+    // Kept distinct from `safe`/`physical` rather than folded into
+    // either: lava is a real liquid (would otherwise pass `safe` exactly
+    // like water) and magma block is a real full-block floor (would
+    // otherwise pass `physical` exactly like stone) -- both need their
+    // normal classification preserved for collision/landing geometry
+    // while still being refused as a route, which a single boolean
+    // couldn't do on its own. See Movements.getBlock's own docstring for
+    // the live danger this flag exists to route around.
+    public final boolean dangerous;
 
     public BlockInfo(
         final int x, final int y, final int z, final boolean known, final boolean safe,
         final boolean physical, final boolean liquid, final boolean climbable, final boolean door, final boolean closedDoor,
-        final boolean stairsOrSlab
+        final boolean stairsOrSlab, final boolean dangerous
     ) {
         this.x = x;
         this.y = y;
@@ -38,6 +49,7 @@ public final class BlockInfo {
         this.door = door;
         this.closedDoor = closedDoor;
         this.stairsOrSlab = stairsOrSlab;
+        this.dangerous = dangerous;
     }
 
     /**

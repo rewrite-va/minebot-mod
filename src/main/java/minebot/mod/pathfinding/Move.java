@@ -19,6 +19,38 @@ import java.util.List;
  * deliberately drops; see Movements.java's docstring for why placement
  * stays out of scope). Empty (not null) for every walk/climb/parkour move
  * that doesn't require digging, so callers never need a null check.
+ *
+ * `requiresJump` marks a move that can only actually be executed with a
+ * real jump input (a step-up/jump-up move, OR any parkour-forward move --
+ * see Movements.getMoveJumpUp/getMoveParkourForward, the only two
+ * producers that ever pass true) -- LegsNavigateNode's own execution used
+ * to infer "should I jump" purely from the waypoint being higher than the
+ * bot's current Y (dy > 0.1), which is wrong for a parkour move that lands
+ * level or even slightly BELOW takeoff (getMoveParkourForward's "gap,
+ * same height" and "gap, drop down" branches): with no jump input queued
+ * at all, the bot just walked off the edge with no forward momentum and
+ * fell straight into the gap it was supposed to clear, live-confirmed as
+ * a parkour move A* planned and then failed every single time it was
+ * attempted. Distinct from dy: a plain step-up already gets a jump input
+ * from dy > 0.1 correctly, but a LEVEL parkour gap needs one despite dy
+ * being ~0, which is exactly the case this field exists to cover.
+ *
+ * `digStance` is the EXACT position Movements.hasDigLineOfSight assumed
+ * the bot would be standing at while breaking through toBreak (null
+ * whenever toBreak is empty -- nothing to stand anywhere for). This is
+ * the move's own ORIGIN (the node digging happens FROM, before the move
+ * completes -- e.g. a jump-up's own headroom obstruction is cleared
+ * before leaving the ground), which is NOT the same position as (x, y, z)
+ * above (the move's real DESTINATION/landing spot) -- reported live: an
+ * earlier version of HandsMineNode's own arrival gate compared the bot's
+ * position against the destination waypoint instead, which the bot can
+ * never actually reach until digging finishes in the first place (a real
+ * chicken-and-egg deadlock, similar in shape to the still-needs-digging
+ * jump-suppression bug this docstring's sibling investigation already
+ * fixed in LegsNavigateNode). Storing the real stance directly here,
+ * rather than trying to reconstruct "wherever the bot roughly was at
+ * planning time" downstream, removes any ambiguity about which position
+ * a toBreak entry's own visibility was actually verified from.
  */
 public final class Move {
     public final int x;
@@ -26,17 +58,33 @@ public final class Move {
     public final int z;
     public final double cost;
     public final List<BlockPos> toBreak;
+    public final boolean requiresJump;
+    public final BlockPos digStance;
 
     public Move(final double x, final double y, final double z, final double cost) {
-        this(x, y, z, cost, Collections.emptyList());
+        this(x, y, z, cost, Collections.emptyList(), false, null);
     }
 
     public Move(final double x, final double y, final double z, final double cost, final List<BlockPos> toBreak) {
+        this(x, y, z, cost, toBreak, false, null);
+    }
+
+    public Move(final double x, final double y, final double z, final double cost, final boolean requiresJump) {
+        this(x, y, z, cost, Collections.emptyList(), requiresJump, null);
+    }
+
+    public Move(final double x, final double y, final double z, final double cost, final List<BlockPos> toBreak, final boolean requiresJump) {
+        this(x, y, z, cost, toBreak, requiresJump, null);
+    }
+
+    public Move(final double x, final double y, final double z, final double cost, final List<BlockPos> toBreak, final boolean requiresJump, final BlockPos digStance) {
         this.x = (int) Math.floor(x);
         this.y = (int) Math.floor(y);
         this.z = (int) Math.floor(z);
         this.cost = cost;
         this.toBreak = toBreak;
+        this.requiresJump = requiresJump;
+        this.digStance = digStance;
     }
 
     public long hash() {

@@ -3,11 +3,14 @@ package minebot.mod;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.animal.bee.Bee;
 import net.minecraft.world.entity.animal.polarbear.PolarBear;
 import net.minecraft.world.entity.animal.wolf.Wolf;
 import net.minecraft.world.entity.monster.Enemy;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
@@ -185,6 +188,58 @@ public final class EntityFinder {
      * change, since there's genuinely no way to detect their live
      * hostility from the client.
      */
+    /**
+     * Returns the nearest LivingEntity within `radius` of `center` whose
+     * most recent damage was dealt directly by `attacker` within the last
+     * ~2 seconds, or null if none -- backs PlayerIntentionDefendNode's
+     * "the defended player is attacking something, help them" trigger.
+     * Deliberately entity-type-agnostic (no `Enemy`/isHostileNow check at
+     * all): per explicit direction, this is NOT about whether vanilla
+     * would consider the target hostile (a pig never would, a provoked
+     * polar bear only sometimes/unreliably would via isHostileNow's own
+     * species-specific heuristics) -- it's purely "did the player we're
+     * defending just hit this thing", which the bot should back up
+     * regardless of species.
+     *
+     * LivingEntity.getLastDamageSource() is the real client-synced signal
+     * this relies on: confirmed via decompiled source that
+     * LivingEntity.handleDamageEvent(DamageSource) -- invoked client-side
+     * off the server's damage-event packet, not a server-only field -- sets
+     * lastDamageSource/lastDamageStamp, and getLastDamageSource() itself
+     * self-expires the value (returns null) once game time - lastDamageStamp
+     * exceeds 40 ticks (2s), so no separate staleness tracking is needed
+     * here. DamageSource.getEntity() is the "causing entity" -- for a bare-
+     * handed/weapon melee hit this is the attacking player directly.
+     */
+    public static Entity findNearestAttackedByPlayer(final ClientLevel level, final Vec3 center, final Player attacker, final double radius) {
+        AABB searchBox = AABB.ofSize(center, radius * 2, radius * 2, radius * 2);
+        double radiusSquared = radius * radius;
+
+        Entity nearest = null;
+        double nearestDistanceSquared = Double.MAX_VALUE;
+
+        for (LivingEntity entity : level.getEntitiesOfClass(LivingEntity.class, searchBox, e -> wasJustAttackedBy(e, attacker))) {
+            double distanceSquared = entity.distanceToSqr(center);
+            if (distanceSquared > radiusSquared) {
+                continue;
+            }
+            if (distanceSquared < nearestDistanceSquared) {
+                nearest = entity;
+                nearestDistanceSquared = distanceSquared;
+            }
+        }
+
+        return nearest;
+    }
+
+    private static boolean wasJustAttackedBy(final LivingEntity entity, final Player attacker) {
+        if (entity == attacker) {
+            return false;
+        }
+        DamageSource lastDamage = entity.getLastDamageSource();
+        return lastDamage != null && lastDamage.getEntity() == attacker;
+    }
+
     private static boolean isHostileNow(final Entity entity) {
         if (entity instanceof Enemy) {
             return true;

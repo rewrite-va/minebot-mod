@@ -4,6 +4,7 @@ import minebot.mod.statemachine.Edge;
 import minebot.mod.statemachine.StateMachine;
 import minebot.mod.statemachine.StateNode;
 import minebot.mod.statemachine.TickContext;
+import minebot.mod.statemachine.hands.HandsMineNode;
 import minebot.mod.statemachine.playerintention.CombatEngagement;
 import minebot.mod.statemachine.playerintention.PlayerIntentionState;
 import minebot.mod.statemachine.legs.LegsState;
@@ -100,12 +101,20 @@ public final class HeadStateMachine {
             HeadState.IDLE, new HeadIdleNode(),
             HeadState.NAVIGATE, navigateNode,
             HeadState.AIM_AT_TARGET, new HeadAimAtTargetNode(),
-            HeadState.FLEE, navigateNode
+            HeadState.FLEE, navigateNode,
+            HeadState.MINE, new HeadMineNode()
         );
 
         Predicate<TickContext> legsFleeing = ctx -> ctx.blackboard.get(legsStateMachine) == LegsState.FLEE;
         Predicate<TickContext> hasLiveThreat = ctx -> ctx.blackboard.get(CombatEngagement.TARGET_ENTITY_ID) != null;
         Predicate<TickContext> legsNavigating = ctx -> LEGS_NAVIGATING_STATES.contains(ctx.blackboard.get(legsStateMachine));
+        // Same fact HandsMineNode itself just committed to breaking this
+        // same tick (see HandsMineNode's own CURRENT_MINING_TARGET
+        // docstring, and MinebotMod's own tick-order comment for why this
+        // is never stale) -- checking the actual published target, not a
+        // re-derivation from WAYPOINT_TO_BREAK, keeps this edge in exact
+        // lockstep with what HeadMineNode will actually aim at.
+        Predicate<TickContext> isMining = ctx -> ctx.blackboard.get(HandsMineNode.CURRENT_MINING_TARGET) != null;
 
         List<Edge<HeadState>> edges = List.of(
             // FLEE checked first from every other state -- see this
@@ -115,17 +124,30 @@ public final class HeadStateMachine {
             new Edge<>(HeadState.IDLE, HeadState.FLEE, legsFleeing),
             new Edge<>(HeadState.NAVIGATE, HeadState.FLEE, legsFleeing),
             new Edge<>(HeadState.AIM_AT_TARGET, HeadState.FLEE, legsFleeing),
+            new Edge<>(HeadState.MINE, HeadState.FLEE, legsFleeing),
 
             new Edge<>(HeadState.IDLE, HeadState.AIM_AT_TARGET, hasLiveThreat),
             new Edge<>(HeadState.NAVIGATE, HeadState.AIM_AT_TARGET, hasLiveThreat),
+            new Edge<>(HeadState.MINE, HeadState.AIM_AT_TARGET, hasLiveThreat),
             new Edge<>(HeadState.FLEE, HeadState.AIM_AT_TARGET, ctx -> !legsFleeing.test(ctx) && hasLiveThreat.test(ctx)),
-            new Edge<>(HeadState.AIM_AT_TARGET, HeadState.IDLE, ctx -> !hasLiveThreat.test(ctx) && !legsNavigating.test(ctx)),
-            new Edge<>(HeadState.AIM_AT_TARGET, HeadState.NAVIGATE, ctx -> !hasLiveThreat.test(ctx) && legsNavigating.test(ctx)),
+            new Edge<>(HeadState.AIM_AT_TARGET, HeadState.IDLE, ctx -> !hasLiveThreat.test(ctx) && !legsNavigating.test(ctx) && !isMining.test(ctx)),
+            new Edge<>(HeadState.AIM_AT_TARGET, HeadState.MINE, ctx -> !hasLiveThreat.test(ctx) && isMining.test(ctx)),
+            new Edge<>(HeadState.AIM_AT_TARGET, HeadState.NAVIGATE, ctx -> !hasLiveThreat.test(ctx) && !isMining.test(ctx) && legsNavigating.test(ctx)),
 
-            new Edge<>(HeadState.IDLE, HeadState.NAVIGATE, legsNavigating),
-            new Edge<>(HeadState.NAVIGATE, HeadState.IDLE, ctx -> !legsNavigating.test(ctx)),
-            new Edge<>(HeadState.FLEE, HeadState.NAVIGATE, ctx -> !legsFleeing.test(ctx) && !hasLiveThreat.test(ctx) && legsNavigating.test(ctx)),
-            new Edge<>(HeadState.FLEE, HeadState.IDLE, ctx -> !legsFleeing.test(ctx) && !hasLiveThreat.test(ctx) && !legsNavigating.test(ctx))
+            // MINE checked before NAVIGATE from every other reachable
+            // source state -- see HeadState's own docstring for why an
+            // obstacle actively being mined always needs the bot looking
+            // at it, not toward the waypoint beyond it.
+            new Edge<>(HeadState.IDLE, HeadState.MINE, isMining),
+            new Edge<>(HeadState.NAVIGATE, HeadState.MINE, isMining),
+            new Edge<>(HeadState.MINE, HeadState.IDLE, ctx -> !isMining.test(ctx) && !legsNavigating.test(ctx)),
+            new Edge<>(HeadState.MINE, HeadState.NAVIGATE, ctx -> !isMining.test(ctx) && legsNavigating.test(ctx)),
+
+            new Edge<>(HeadState.IDLE, HeadState.NAVIGATE, ctx -> !isMining.test(ctx) && legsNavigating.test(ctx)),
+            new Edge<>(HeadState.NAVIGATE, HeadState.IDLE, ctx -> !legsNavigating.test(ctx) && !isMining.test(ctx)),
+            new Edge<>(HeadState.FLEE, HeadState.NAVIGATE, ctx -> !legsFleeing.test(ctx) && !hasLiveThreat.test(ctx) && !isMining.test(ctx) && legsNavigating.test(ctx)),
+            new Edge<>(HeadState.FLEE, HeadState.MINE, ctx -> !legsFleeing.test(ctx) && !hasLiveThreat.test(ctx) && isMining.test(ctx)),
+            new Edge<>(HeadState.FLEE, HeadState.IDLE, ctx -> !legsFleeing.test(ctx) && !hasLiveThreat.test(ctx) && !isMining.test(ctx) && !legsNavigating.test(ctx))
         );
         return new StateMachine<>("head", HeadState.IDLE, nodes, edges);
     }

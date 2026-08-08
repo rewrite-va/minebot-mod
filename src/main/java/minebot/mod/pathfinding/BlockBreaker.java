@@ -56,9 +56,10 @@ import java.lang.reflect.Field;
  * apparently missing. This relies on Minecraft's own per-frame crosshair
  * raycast (`hitResult`, recomputed every frame from the real player yaw/
  * pitch via Player.raycastHitResult) actually landing on the target block --
- * satisfied here because aimAt (below) already sets real yaw/pitch at the
- * target before the key is held, the same way a human turning to look at a
- * block before clicking would.
+ * satisfied here because HeadMineNode (Head SM, see its own docstring)
+ * already sets real yaw/pitch at the target before this class ever holds
+ * the key, the same way a human turning to look at a block before
+ * clicking would.
  *
  * Called every tick from MinebotMod.resolveMovementIntent while a
  * pathfinding waypoint's toBreak list or a dig_down/collect goal has a
@@ -142,6 +143,13 @@ public final class BlockBreaker {
     // own just-completed break from a target that vanished some other
     // way, and would misclassify a real success as an abandoned target).
     private BlockPos lastCompletedTarget;
+    // The position most recently given up on via STUCK_TICKS_LIMIT (either
+    // branch -- see justAbandoned's own docstring for why callers need
+    // this distinct from lastCompletedTarget: a give-up is NOT a success,
+    // but a caller still needs to know "stop retrying THIS position"
+    // rather than silently re-selecting the identical unreachable target
+    // forever the instant currentTarget goes back to null.
+    private BlockPos lastAbandonedTarget;
 
     public BlockBreaker(final String label) {
         this.label = label;
@@ -196,6 +204,26 @@ public final class BlockBreaker {
      */
     public boolean justFinishedSettling(final BlockPos pos) {
         return !isBusy() && pos.equals(lastCompletedTarget);
+    }
+
+    /**
+     * True if `pos` is the position STUCK_TICKS_LIMIT most recently gave up
+     * on (either the swinging-forever branch or the never-visible branch --
+     * see both of tryBreak's own give-up sites) -- lets a caller
+     * distinguish "this target is genuinely done" (justFinishedSettling)
+     * from "this target could never be finished, stop retrying it"
+     * (this method). Without this, a caller that only checks
+     * currentTarget()/isBusy() to decide whether to pick a fresh target
+     * has no way to tell a real give-up apart from simply "nothing
+     * committed yet" -- and would immediately re-select the exact same
+     * permanently-unreachable position on its very next pick, since
+     * nothing about the give-up itself removes `pos` from whatever list
+     * the caller is choosing from. No settle window (unlike a real
+     * completion) -- there's nothing to settle after abandoning a target
+     * that was never actually broken.
+     */
+    public boolean justAbandoned(final BlockPos pos) {
+        return currentTarget == null && pos.equals(lastAbandonedTarget);
     }
 
     /**
@@ -324,9 +352,31 @@ public final class BlockBreaker {
             // (rather than swinging at empty air toward an obstructed
             // target) matches what a real client would do: the crosshair
             // simply can't land on a block hidden behind another one.
-            // The caller (tickCollectBlock) is responsible for eventually
-            // giving up on a target that never becomes visible -- see its
-            // own docstring.
+            //
+            // Counted against STUCK_TICKS_LIMIT here too, not just the
+            // swinging-in-progress branch below -- reported live:
+            // pathfinding held a target permanently obstructed from its
+            // own dig stance (in INTERACT_RANGE, but no real angle ever
+            // clears the obstruction) for 1300+ consecutive ticks with
+            // zero recovery, since isNewTarget only resets stuckTicks to 0
+            // and the increment below is never reached from this early
+            // return -- a target that's already `currentTarget` never
+            // looks "new" again, so stuckTicks stayed frozen at whatever
+            // it was before line-of-sight was lost, forever. A target with
+            // NO line of sight at all is exactly as permanently stuck as
+            // one that swings forever without completing -- both need the
+            // same give-up, just reached via a different early return.
+            if (++stuckTicks > STUCK_TICKS_LIMIT) {
+                MinebotMod.LOGGER.warn(
+                    "mining[{}]: tryBreak({}) -- giving up after {} ticks with no line of sight (in range, never visible -- see this branch's own comment for the live repro this guards against)",
+                    label, pos, stuckTicks
+                );
+                currentTarget = null;
+                stuckTicks = 0;
+                lastAbandonedTarget = pos;
+                releaseAttackKey();
+                return false;
+            }
             MinebotMod.LOGGER.info("mining[{}]: tryBreak({}) -- no line of sight", label, pos);
             releaseAttackKey();
             return false;
@@ -406,12 +456,29 @@ public final class BlockBreaker {
             );
             currentTarget = null;
             stuckTicks = 0;
+            lastAbandonedTarget = pos;
             releaseAttackKey();
             Minecraft.getInstance().gameMode.stopDestroyBlock();
             return false;
         }
 
-        aimAt(player, pos);
+        // Aiming is no longer done here -- HeadMineNode (Head SM) now owns
+        // it exclusively, the same way HeadAimAtTargetNode already owns
+        // combat aim (see HeadState's own class docstring: "Owns yaw/pitch
+        // exclusively"). Head runs Hands' own currentMiningTarget through
+        // the exact same aimAt-shaped logic every tick BEFORE this method
+        // is even called (see MinebotMod's own tick-order comment: Hands
+        // publishes HandsMineNode.CURRENT_MINING_TARGET, then Head reads it
+        // same-tick, then Hands' onTick -- this method -- actually runs),
+        // so by the time tryBreak gets here the real yaw/pitch is already
+        // set correctly and this can just rely on it, the same way
+        // hasLineOfSight above already just reads real player state rather
+        // than setting it. Used to call aimAt(player, pos) directly here;
+        // removed specifically to stop this and HeadNavigateNode's own
+        // per-tick setXRot(0f) from fighting over pitch on the exact ticks
+        // this method took an early return (e.g. the switchedTool branch
+        // just above) before ever reaching this line -- see the bug this
+        // was chasing, documented in FINDINGS.md.
 
         // Hold the real keyAttack keybind rather than calling
         // startDestroyBlock/continueDestroyBlock ourselves -- see this
@@ -422,10 +489,11 @@ public final class BlockBreaker {
         // already established for eating, is confirmed to work where the
         // direct call didn't). Idempotent to call every tick while a break
         // is still in progress -- setDown(true) on an already-down key is
-        // a no-op. Relies on aimAt (just above) having set real yaw/pitch
-        // at this target -- Minecraft's own per-frame crosshair raycast
-        // needs to actually be landing on `pos` for handleKeybinds' held-key
-        // handling to do anything.
+        // a no-op. Relies on HeadMineNode having already set real yaw/pitch
+        // at this target earlier this same tick (see MinebotMod's own
+        // tick-order comment) -- Minecraft's own per-frame crosshair
+        // raycast needs to actually be landing on `pos` for handleKeybinds'
+        // held-key handling to do anything.
         holdAttackKey();
 
         // Debug-only per-tick diagnostic (kept cheap/always-on at info,
@@ -438,7 +506,14 @@ public final class BlockBreaker {
         // internally (see this class's own docstring) -- logging it every
         // tick makes it directly observable whether real progress is
         // accumulating at all, or something is silently keeping it at (or
-        // resetting it to) a rate that never reaches completion.
+        // resetting it to) a rate that never reaches completion. Also what
+        // caught a real, separate live bug this way: a jump-up waypoint's
+        // headroom mining kept resetting destroy progress because Legs
+        // kept re-firing the jump every tick regardless of mining
+        // progress, swinging the bot's own eye height enough to knock the
+        // real per-tick raycast off the target block onto its neighbor --
+        // see LegsNavigateNode's own stillNeedsDigging for the actual fix
+        // (holding off on the jump until toBreak is clear).
         MinebotMod.LOGGER.info(
             "mining[{}]: tryBreak({}) -- holding keyAttack, mainHand={}, getDestroyProgress this tick={}, real internal state: {}",
             label, pos, player.getMainHandItem(), state.getDestroyProgress(player, level, pos), dumpRealDestroyState()
@@ -576,18 +651,41 @@ public final class BlockBreaker {
                 destroyingItemField.setAccessible(true);
             }
             Minecraft mc = Minecraft.getInstance();
+            // HitResult/BlockHitResult have no toString() override -- the
+            // default Object identity hash ("BlockHitResult@1a2b3c4d") was
+            // useless for telling a real BLOCK hit on the intended position
+            // apart from a MISS or a hit on some other block entirely, which
+            // is exactly the distinction needed to diagnose "destroyBlockPos
+            // stuck at the sentinel despite real focus/mouse-grab" (see the
+            // live investigation this dump is chasing, documented in
+            // FINDINGS.md) -- unpacking the real type/position/distance
+            // here instead.
+            String hitResultSummary = describeHitResult(mc.hitResult, mc.player);
             return String.format(
                 "isDestroying=%s, destroyBlockPos=%s, destroyingItem=%s, destroyProgress(cumulative)=%s, destroyTicks=%s, "
                     + "isWindowActive=%s, isMouseGrabbed=%s, screen=%s, hitResult=%s",
                 gameMode.isDestroying(), destroyBlockPosField.get(gameMode), destroyingItemField.get(gameMode),
                 destroyProgressField.get(gameMode), destroyTicksField.get(gameMode),
-                mc.isWindowActive(), mc.mouseHandler.isMouseGrabbed(), mc.screen, mc.hitResult
+                mc.isWindowActive(), mc.mouseHandler.isMouseGrabbed(), mc.screen, hitResultSummary
             );
         } catch (ReflectiveOperationException e) {
             reflectionFailed = true;
             MinebotMod.LOGGER.warn("mining: dumpRealDestroyState reflection failed, disabling further attempts", e);
             return "reflection failed: " + e;
         }
+    }
+
+    /** Unpacks HitResult's real type/position/distance -- see dumpRealDestroyState's own comment for why the default toString() wasn't usable here. */
+    private static String describeHitResult(final HitResult hitResult, final LocalPlayer player) {
+        if (hitResult == null) {
+            return "null";
+        }
+        double distance = hitResult.getLocation().distanceTo(player.getEyePosition());
+        if (hitResult.getType() == HitResult.Type.BLOCK) {
+            BlockHitResult blockHit = (BlockHitResult) hitResult;
+            return String.format("BLOCK pos=%s face=%s distance=%.2f", blockHit.getBlockPos(), blockHit.getDirection(), distance);
+        }
+        return String.format("%s location=%s distance=%.2f", hitResult.getType(), hitResult.getLocation(), distance);
     }
 
     /**
@@ -613,94 +711,13 @@ public final class BlockBreaker {
         }
     }
 
-    // Below this horizontal offset (blocks) from the target block's own
-    // center, atan2(dy, horizontalDistance)/atan2(-dx, dz) both approach a
-    // numerically degenerate near-vertical singularity -- yaw becomes
-    // effectively arbitrary (tiny floating-point noise in dx/dz swings it
-    // wildly) right as pitch approaches +90, exactly the geometry of
-    // digging a block directly underfoot (pathfinding's own dig-through-
-    // obstacles case, not !collect's roughly-eye-level targets). Reported
-    // live via the reflection diagnostic (dumpRealDestroyState):
-    // isDestroying stayed false forever (destroyBlockPos stuck at the
-    // {-1,-1,-1} "nothing targeted" sentinel, meaning vanilla's real
-    // raycast was outright MISSING, not just landing on a neighboring
-    // block) for a target only ~0.08 blocks of horizontal offset away,
-    // pitch ~87.8 degrees -- confirmed isWindowActive=true,
-    // isMouseGrabbed=true at the time, ruling out the separate mouse-grab
-    // cause entirely for this specific failure. Below this threshold,
-    // aim at a point offset toward one corner of the target's top face
-    // instead of its exact center -- still guaranteed to land on the
-    // target itself (the offset stays within the block's own footprint),
-    // but restores a well-defined, non-degenerate horizontal direction
-    // for both yaw and pitch to point toward.
-    //
-    // A first attempt at this used a much smaller offset (0.3) and only
-    // brought pitch down a few degrees (e.g. 86.6 -> 83.6 for a ~2-block
-    // vertical drop) -- confirmed live via the diagnostic that this
-    // wasn't nearly enough: destroyBlockPos still locked onto the wrong
-    // (one-block-off) neighbor at that reduced-but-still-steep angle.
-    // 0.5 blocks is the largest offset from center that still guarantees
-    // staying within the target block's own footprint on both axes
-    // (center 0.5 +/- 0.5 spans the full [0,1) range) -- using the
-    // largest safe value, not a token nudge, maximizes how much this can
-    // actually reduce pitch for any given vertical drop.
-    private static final double NEAR_VERTICAL_HORIZONTAL_THRESHOLD = 0.5;
-    private static final double NEAR_VERTICAL_AIM_OFFSET = 0.5 - 0.02;
-
-    private static void aimAt(final LocalPlayer player, final BlockPos pos) {
-        double targetX = pos.getX() + 0.5;
-        double targetZ = pos.getZ() + 0.5;
-        double roughDx = targetX - player.getX();
-        double roughDz = targetZ - player.getZ();
-        if (Math.sqrt(roughDx * roughDx + roughDz * roughDz) < NEAR_VERTICAL_HORIZONTAL_THRESHOLD) {
-            targetX = pos.getX() + NEAR_VERTICAL_AIM_OFFSET;
-            targetZ = pos.getZ() + NEAR_VERTICAL_AIM_OFFSET;
-        }
-
-        double dx = targetX - player.getX();
-        double dz = targetZ - player.getZ();
-        double dy = (pos.getY() + 0.5) - player.getEyeY();
-        double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
-
-        float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
-        // Positive pitch = looking down (same convention confirmed in
-        // NearbyPlayerLookAt's own docstring via decompiled
-        // Entity.calculateViewVector).
-        float pitch = (float) -Math.toDegrees(Math.atan2(dy, horizontalDistance));
-        player.setYRot(yaw);
-        player.setXRot(pitch);
-
-        // Also snap yRotO/xRotO (the *previous*-tick rotation, used to
-        // interpolate the actual rendered/raycast camera angle across
-        // partial ticks -- see Entity.getViewXRot/getViewYRot, and
-        // LocalPlayer.raycastHitResult's own use of
-        // cameraEntity.getEyePosition(partialTicks)/cameraEntity.pick,
-        // both partial-tick-interpolated) to the same value, not just the
-        // current-tick rotation -- confirmed root cause via the reflection
-        // diagnostic (dumpRealDestroyState): a real break's destroyBlockPos
-        // consistently locked onto a *different*, adjacent block than the
-        // one tryBreak was actually aiming at and holding keyAttack toward,
-        // specifically for steep-pitch targets (pathfinding digging the
-        // block directly below/beside the bot's own feet, ~70-86 degrees
-        // pitch) -- isDestroying stayed false forever despite real,
-        // steady, correct-formula getDestroyProgress logging every tick,
-        // because vanilla's own hitResult (computed from the interpolated,
-        // partial-tick camera angle, not the raw discrete player rotation
-        // this method sets) never actually agreed with what this class
-        // thought it was aiming at. A single-tick rotation snap from
-        // whatever the bot was previously looking at (e.g. level, mid-walk)
-        // to a steep mining pitch leaves several rendered frames still
-        // easing from the *old* angle (xRotO) toward the new one, long
-        // enough for the real per-frame raycast to clip a neighboring
-        // block instead -- exactly the observed one-block-off mismatch.
-        // Setting xRotO/yRotO immediately removes that lag the same way
-        // Entity's own moveTo(...) does when teleporting (confirmed via
-        // decompiled source) -- there's no legitimate reason for this
-        // mod's own aim to ever be smoothly interpolated toward, unlike a
-        // human's actual mouse movement.
-        player.yRotO = yaw;
-        player.xRotO = pitch;
-    }
+    // Aiming (yaw/pitch, including the near-vertical-safe offset and the
+    // yRotO/xRotO same-tick snap) used to live here as a private aimAt
+    // method, called directly from tryBreak above -- moved to HeadMineNode
+    // (see its own docstring) so Head owns yaw/pitch exclusively for
+    // mining the same way it already does for combat/navigation, instead
+    // of this class and HeadNavigateNode both writing rotation on
+    // different ticks with no coordination between them.
 
     // Sample points on the target block, tried in order until one has
     // clear line of sight -- the exact center alone is too strict: a
@@ -751,103 +768,56 @@ public final class BlockBreaker {
     }
 
     /**
-     * Scans main storage + hotbar (Inventory slots 0-35 -- armor/offhand
-     * slots 36-42 are deliberately excluded, swapping a chestplate into
-     * the hotbar to mine with makes no sense) for whichever carried item
-     * has the highest real ItemStack.getDestroySpeed(state) against the
-     * target block, and hotbar-swaps to it (via InventoryActions.
-     * moveToHotbar's existing local-state-swap idiom, reusing hotbar slot
-     * 8) if it beats what's currently in hand. Real getDestroySpeed is
-     * the same per-item mining-speed value BlockState.getDestroyProgress
-     * itself reads internally (confirmed via BlockBehaviour's decompiled
-     * source), so "best tool" here means exactly what the game's own
-     * progress calculation would agree is fastest -- no separate
-     * tool-category guessing (pickaxe vs axe vs shovel) needed.
+     * Switches to the best real tool for `state` via InventoryController.
+     * selectTool (see its own docstring for the real find/select mechanics
+     * -- real getDestroySpeed ranking, isCorrectToolForDrops-aware so a
+     * fast-but-wrong tool never gets preferred over a correct one that
+     * actually produces drops) -- extracted from this class's own inline
+     * scan into InventoryController per explicit direction, matching the
+     * same findBestWeapon/selectWeapon and findBestFood/selectFood shape
+     * every other real inventory decision in this codebase already uses,
+     * rather than staying the one holdout still doing its own ad hoc
+     * scan+swap (see InventoryController's own class docstring, which
+     * already called this out as consolidated -- it never actually was
+     * until now).
      *
      * Called only when starting a fresh target (see tryBreak's isNewTarget
-     * branch), not every tick of an already-in-progress break. This used
-     * to run unconditionally every tick specifically so FoodEater's
-     * auto-eat logic stealing the hotbar selection mid-break (to eat)
-     * would get corrected on the very next tick rather than silently
-     * mining the rest of that block with whatever was left selected --
-     * but real vanilla treats *any* mid-break hotbar swap, even
-     * reselecting the exact same logical item, as starting a brand new
-     * destroy sequence (MultiPlayerGameMode.sameDestroyTarget requires the
-     * held ItemStack to stay identical by full component comparison, not
-     * just same item type -- confirmed via decompiled source), resetting
-     * real destroy progress back to zero either way. Reported live: mined
-     * stone with a real pickaxe in hand consistently appeared to break
-     * (client-side prediction showed it gone, sometimes visibly
-     * reappearing and needing a second "break") but never actually
-     * produced a drop -- exactly what a client-predicted completion
-     * getting silently reverted by the server's own still-resetting
-     * destroy-progress tracking would look like from outside. Restricting
-     * this to only new-target ticks removes one concrete way this mod
-     * itself could trigger that reset mid-break; FoodEater stealing the
-     * selection mid-break remains a real, separate, pre-existing tradeoff
-     * (see its own docstring) this doesn't attempt to solve.
+     * branch), not every tick of an already-in-progress break -- real
+     * vanilla treats *any* mid-break hotbar swap, even reselecting the
+     * identical logical item, as starting a brand new destroy sequence
+     * (MultiPlayerGameMode.sameDestroyTarget requires the held ItemStack
+     * to stay identical by full component comparison, not just same item
+     * type -- confirmed via decompiled source), resetting real destroy
+     * progress back to zero either way. Reported live: mined stone with a
+     * real pickaxe in hand consistently appeared to break (client-side
+     * prediction showed it gone, sometimes visibly reappearing and
+     * needing a second "break") but never actually produced a drop --
+     * exactly what a client-predicted completion getting silently
+     * reverted by the server's own still-in-progress destroy-progress
+     * would look like from outside. Restricting this to only new-target
+     * ticks removes one concrete way this mod itself could trigger that
+     * reset mid-break.
      */
     private static boolean maybeSwitchToBestTool(final LocalPlayer player, final BlockState state) {
         Inventory inventory = player.getInventory();
         int selectedSlot = inventory.getSelectedSlot();
         ItemStack selectedStack = inventory.getItem(selectedSlot);
-        int bestSlot = -1;
-        // Starting bestSpeed from the currently-selected item's own speed
-        // means "nothing carried beats it" is only really true when
-        // something is actually selected. Reported live: !collect on a
-        // hardness-0 block (carrots -- real vanilla ItemStack.
-        // getDestroySpeed against a 0-hardness block returns 1.0
-        // regardless of what's held, tools included) with an empty
-        // hotbar slot already selected (e.g. after !give emptied it and
-        // nothing was ever reselected) never switched away from that
-        // empty slot -- every real carried item tied bestSpeed (1.0)
-        // rather than strictly beating it, and an empty ItemStack was
-        // never excluded from being the *starting* baseline the way the
-        // scan loop below already excludes it from being a *candidate*
-        // (stack.isEmpty() continue, just below). Bare hands should never
-        // be preferred over holding literally anything, independent of
-        // whatever tie the speed math produces -- forcing bestSpeed to
-        // -1 whenever nothing is currently selected means the very first
-        // real (non-empty) item found always counts as strictly better,
-        // regardless of its own speed.
-        float bestSpeed = selectedStack.isEmpty() ? -1.0f : selectedStack.getDestroySpeed(state);
 
-        for (int slot = 0; slot < 36; slot++) {
-            ItemStack stack = inventory.getItem(slot);
-            if (stack.isEmpty()) {
-                continue;
-            }
-            float speed = stack.getDestroySpeed(state);
-            // Per-slot scan detail stays at debug (one line per carried
-            // item, every tick a switch is even considered) -- the two
-            // summary lines below are the ones that actually matter for
-            // "is it picking the right tool", promoted to info
-            // (temporarily, for the live report this was added to chase
-            // -- "still not using the pickaxe" after the pickSlot fix)
-            // since this client's default log4j config filters debug
-            // output entirely and no debug line from this mod has ever
-            // actually appeared in a real log.
-            MinebotMod.LOGGER.debug("mining: slot {} ({}) speed={}", slot, stack.getItem(), speed);
-            if (speed > bestSpeed) {
-                bestSpeed = speed;
-                bestSlot = slot;
-            }
+        InventoryController.ToolChoice choice = InventoryController.selectTool(player, state);
+        if (choice == null) {
+            MinebotMod.LOGGER.info("mining: keeping slot {} ({}) -- nothing carried beats it", selectedSlot, selectedStack.getItem());
+            return false;
         }
 
-        if (bestSlot >= 0) {
-            MinebotMod.LOGGER.info(
-                "mining: switching to slot {} ({}, speed={}) -- was slot {} ({}, speed={})",
-                bestSlot, inventory.getItem(bestSlot).getItem(), bestSpeed, selectedSlot, selectedStack.getItem(),
-                selectedStack.getDestroySpeed(state)
-            );
-            InventoryController.moveToHotbar(player, bestSlot, 8);
-            MinebotMod.LOGGER.info(
-                "mining: after switch, selected slot is now {} ({})",
-                inventory.getSelectedSlot(), inventory.getItem(inventory.getSelectedSlot()).getItem()
-            );
-            return true;
-        }
-        MinebotMod.LOGGER.info("mining: keeping slot {} ({}) -- nothing carried beats it", selectedSlot, selectedStack.getItem());
-        return false;
+        MinebotMod.LOGGER.info(
+            "mining: switching to slot {} ({}, speed={}) -- was slot {} ({}, speed={})",
+            choice.slot(), choice.stack().getItem(), choice.stack().getDestroySpeed(state), selectedSlot, selectedStack.getItem(),
+            selectedStack.getDestroySpeed(state)
+        );
+        MinebotMod.LOGGER.info(
+            "mining: after switch, selected slot is now {} ({})",
+            inventory.getSelectedSlot(), inventory.getItem(inventory.getSelectedSlot()).getItem()
+        );
+        return true;
     }
 }

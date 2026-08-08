@@ -49,8 +49,13 @@ package minebot.mod.statemachine.hands;
  * shaped nothing like a bow's hold-and-auto-release), same
  * line-of-sight-only gating, no range gate either.
  *
- * More states (mining, ...) get added later, per STATE_MACHINE.md's
- * "Implementation order".
+ * MINE digs through whatever block(s) Legs' current pathfinding waypoint
+ * needs broken to actually execute its planned move (LegsNavigateNode.
+ * WAYPOINT_TO_BREAK, e.g. a leaves block in a jump's headroom) -- restores
+ * the "digging through obstacle blocks while walking" gap LegsNavigateNode's
+ * own docstring explicitly left open during the state-machine port. See
+ * HandsMineNode's own docstring for the real mechanics (built on the
+ * existing BlockBreaker engine).
  */
 public enum HandsState {
     IDLE,
@@ -58,5 +63,6 @@ public enum HandsState {
     EAT,
     MELEE_ATTACK,
     DRAW_BOW,
-    DRAW_CROSSBOW
+    DRAW_CROSSBOW,
+    MINE
 }

@@ -17,19 +17,20 @@ package minebot.mod.statemachine;
  * see STATE_MACHINE.md's "Implementation order").
  */
 public sealed interface Command {
-    record Follow(int entityId, double stopDistance) implements Command {
+    /** `playerName` is the real player name to follow, resolved by PlayerController on demand every tick (see PlayerIntention.Snapshot's own docstring for why a NAME, not a pre-resolved entity id, is the thing carried around -- names never go stale, ids/uuids do). */
+    record Follow(String playerName, double stopDistance) implements Command {
     }
 
     /** !stop -- cancel whatever's currently going on. Deliberately carries no data (it's the same signal regardless of what's currently active). */
     record Stop() implements Command {
     }
 
-    /** !kill [query] -- fight a target. `entityId`, when present (non-null), is a player entity id already resolved Python-side via EntityTracker (same Follow-style name->id lookup !defend uses) and takes priority over `query`. Otherwise `query` is a raw entity-type string ("zombie") resolved client-side (mirrors the deleted EntityFinder's old shape -- Python has no non-player entity tracking to resolve this itself). Both null means "nearest hostile mob". */
+    /** !kill [query] -- fight a target. `entityId`, when present (non-null), is a player entity id already resolved Python-side via EntityTracker (same Follow-style name->id lookup !defend uses) and takes priority over `query`. Otherwise `query` is a raw entity-type string ("zombie") resolved client-side (mirrors the deleted EntityFinder's old shape -- Python has no non-player entity tracking to resolve this itself). Both null means "nearest hostile mob". Deliberately NOT switched to a player-name field the way Follow/Defend were -- !kill is a one-shot trigger (see PlayerIntention's own docstring for why it isn't even a standing PlayerIntention value), not a standing goal that needs to keep re-resolving across many ticks/range changes, so the existing one-time Python-side resolution is still the right shape here. */
     record Kill(Integer entityId, String query) implements Command {
     }
 
-    /** !defend [player] -- standing protection mode: auto-fights the nearest hostile to `defendTargetEntityId`, staying near that entity between fights (same real Follow-style name->id resolution Python already does for !follow -- see MovementController's own docstring). `defendTargetEntityId` null means "defend the bot itself" (no argument given). */
-    record Defend(Integer defendTargetEntityId) implements Command {
+    /** !defend [player] -- standing protection mode: auto-fights the nearest hostile to whoever `defendTargetPlayerName` names, staying near that player between fights (resolved by PlayerController on demand every tick, same reasoning as Follow's own playerName -- see PlayerIntention.Snapshot's own docstring). `defendTargetPlayerName` null means "defend the bot itself" (no argument given). */
+    record Defend(String defendTargetPlayerName) implements Command {
     }
 
     /** !pickup -- walk to and grab every dropped item within LegsPickupItemsNode's own RADIUS of wherever the bot is standing the instant this command arrives (see its own docstring). Deliberately carries no data (same shape as Stop) -- the anchor position is resolved from the LIVE player position on the tick thread once LegsStateMachine's own edge sees this, not from anything captured here on the WebSocket thread. */
