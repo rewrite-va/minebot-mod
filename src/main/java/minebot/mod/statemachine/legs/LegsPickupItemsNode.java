@@ -146,11 +146,11 @@ public final class LegsPickupItemsNode implements StateNode<LegsState> {
     // everywhere"): a kited/kiting fight (see CombatEngagement's own
     // docstring for why the bot itself repositions constantly while
     // fighting) can end well away from where a mob actually died, and
-    // knockback/explosions (creeper) scatter drops further still. Matches
-    // CombatEngagement.SEARCH_RADIUS -- the same "how far this fight could
-    // plausibly have ranged" scope LegsStateMachine's own visible-hostile
-    // check already reuses for the identical reason.
-    private static final double POST_FIGHT_RADIUS = CombatEngagement.SEARCH_RADIUS;
+    // knockback/explosions (creeper) scatter drops further still. Tuned
+    // below CombatEngagement.SEARCH_RADIUS (32.0) -- that full search range
+    // is wider than fights actually drift in practice, and sweeping it
+    // for item pickup was costing unnecessary walk time.
+    private static final double POST_FIGHT_RADIUS = 24.0;
     private static final double ARRIVAL_DISTANCE = 0.3;
     // Widened alongside RADIUS -- 10s was tuned for items clustered right
     // at the death spot; a wide radius can need several long walks in a
