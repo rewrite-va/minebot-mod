@@ -122,7 +122,7 @@ public final class EntityFinder {
      * "busy" defending against for queued-task purposes, matching what
      * DEFEND's own combat targeting would actually react to. Still
      * deliberately NOT applied to findNearestHostile's remaining caller
-     * (PlayerIntentionKillNode's bare `!kill` fallback) -- an explicit
+     * (KillTask's bare `!kill` fallback) -- an explicit
      * `!kill` with no query is allowed to path toward a heard-but-not-
      * yet-seen mob same as before, unchanged.
      */

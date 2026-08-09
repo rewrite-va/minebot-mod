@@ -20,12 +20,20 @@ import java.util.function.Consumer;
  * "a cross-cutting concern that isn't itself a graph of states") FIFO
  * queue of one-shot Task work -- see prompt.txt/the conversation that
  * produced this for the full design. !give is the first real Task
- * (GiveTask); !sleep (SleepTask) is the second -- moved here from an
- * earlier PlayerIntentionState.SLEEP peer-SM node per explicit direction
- * ("implement it more like !give, which is a task in a queue"), since
- * "walk to a bed and sleep" is exactly the queued-unit-of-work shape a
- * Task already exists for, not a standing intention. This class itself
- * has no give/sleep-specific knowledge at all.
+ * (GiveTask); !sleep (SleepTask) and !kill (KillTask) followed -- both
+ * moved here from an earlier PlayerIntentionState peer-SM node/axis value
+ * per the same "walk over there and do a thing, then be done" reasoning:
+ * neither is a standing intention, just a queued unit of work.
+ *
+ * KILL is the one exception to "this class has no task-specific
+ * knowledge at all" (see tick()'s own Command.Kill handling below): a
+ * fresh !kill arriving while a KillTask is already current needs to
+ * RE-TARGET that same fight, not queue a second, separate kill behind it
+ * -- the queue-model replacement for what used to be PlayerIntionState's
+ * own KILL->KILL self-loop. Nothing else needs this (GiveTask/SleepTask
+ * have no equivalent "re-issue mid-flight" concept), so it's a narrow,
+ * explicit special case rather than a general "tasks can be retargeted"
+ * mechanism on the Task interface itself.
  *
  * Deliberately NOT a peer StateMachine<S>: a Task has no "which state am I
  * in" concept, no Edge table, no notion of ever being re-entered once
@@ -96,7 +104,7 @@ public final class TaskController {
         return queue.size() + (currentTask != null ? 1 : 0);
     }
 
-    /** Call once per client tick. First enqueues a fresh GiveTask/SleepTask for every Command.Give/Command.Sleep seen this tick (the cross-thread handoff CommandBus exists for -- see Command.Give/Command.Sleep's own docstrings), then ticks the current task if there is one (retiring it via onExit the moment it reports isFinished()), otherwise dequeues a fresh one if canDequeueTask() allows it. */
+    /** Call once per client tick. First enqueues a fresh GiveTask/SleepTask/KillTask for every Command.Give/Command.Sleep/Command.Kill seen this tick (the cross-thread handoff CommandBus exists for -- see Command.Give/Command.Sleep/Command.Kill's own docstrings) -- except Command.Kill while currentTask is ALREADY a KillTask, which re-targets it in place instead (see this class's own docstring for why) -- then ticks the current task if there is one (retiring it via onExit the moment it reports isFinished()), otherwise dequeues a fresh one if canDequeueTask() allows it. */
     public void tick(final TickContext ctx) {
         for (Command command : ctx.commands) {
             if (command instanceof Command.Give give) {
@@ -104,6 +112,13 @@ public final class TaskController {
             }
             if (command instanceof Command.Sleep) {
                 enqueue(new SleepTask());
+            }
+            if (command instanceof Command.Kill kill) {
+                if (currentTask instanceof KillTask killTask) {
+                    killTask.retarget(ctx, kill.entityId(), kill.query());
+                } else {
+                    enqueue(new KillTask(kill.entityId(), kill.query()));
+                }
             }
         }
 
@@ -152,7 +167,7 @@ public final class TaskController {
      * Uses EntityFinder.findNearestVisibleHostile (the same DEFEND-
      * specific, line-of-sight-gated scan PlayerIntentionDefendNode's own
      * combat targeting uses), NOT the plain findNearestHostile
-     * PlayerIntentionKillNode's bare `!kill` fallback still uses -- per
+     * KillTask's bare `!kill` fallback still uses -- per
      * explicit direction ("I dont want to be stopped to sleep because of
      * a monster behind a wall"): the queue was holding off a !sleep/!give
      * for a hostile DEFEND itself wouldn't even have engaged yet (plain

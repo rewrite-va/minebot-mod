@@ -21,7 +21,7 @@ package minebot.mod.statemachine.playerintention;
  * standing goal the player is describing. The underlying intention (IDLE/
  * FOLLOW/DEFEND) never changes just because a kill was issued; once the
  * target's dead (or the fight's abandoned), KILL resumes straight back to
- * whatever intention already said -- see PlayerIntentionKillNode's own
+ * whatever intention already said -- see KillTask's own
  * docstring.
  *
  * DEFEND (Command.Defend/!defend), unlike KILL, IS a real standing
@@ -32,7 +32,7 @@ package minebot.mod.statemachine.playerintention;
  * shared engagement logic KILL uses) without ever leaving DEFEND itself.
  *
  * This is what KILL's own exit edge resumes TO, instead of a node-tracked
- * one-hop-back stateToResume -- see PlayerIntentionKillNode's own docstring for the
+ * one-hop-back stateToResume -- see KillTask's own docstring for the
  * multi-hop bug an earlier per-node stateToResume approach had (dying
  * mid-fight would lose the real FOLLOW/DEFEND target through a multi-hop
  * interruption chain -- moot now that death isn't even one of the hops

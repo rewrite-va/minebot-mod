@@ -110,7 +110,7 @@ import java.util.function.Predicate;
  * same CombatEngagement.publish/clear (or DEFEND's own equivalent inline
  * null-out). "No visible monsters" reuses
  * EntityFinder.findNearestVisibleHostile (not the plain
- * findNearestHostile PlayerIntentionKillNode's bare !kill fallback uses)
+ * findNearestHostile KillTask's bare !kill fallback uses)
  * -- same real line-of-sight semantics PlayerIntentionDefendNode already
  * relies on for "is a threat actually engageable", so a hostile merely
  * heard/behind a wall doesn't block the sweep from starting. Ranked

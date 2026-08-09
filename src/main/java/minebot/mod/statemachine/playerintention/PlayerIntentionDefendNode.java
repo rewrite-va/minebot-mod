@@ -14,7 +14,7 @@ import net.minecraft.world.phys.Vec3;
 /**
  * Standing protection mode -- auto-fights the nearest hostile to the
  * BOT ITSELF (not the defend target -- see below), and stays near the
- * defend target (FOLLOW-style) between fights. Unlike PlayerIntentionKillNode,
+ * defend target (FOLLOW-style) between fights. Unlike KillTask,
  * DEFEND never leaves itself to fight -- it's a real PlayerIntention value
  * (see its own docstring), so there's no "resume back to DEFEND once the
  * fight ends" transition needed: this node just keeps publishing
@@ -66,13 +66,13 @@ import net.minecraft.world.phys.Vec3;
  * (EntityFinder.findNearestHostile's own center) and this preemption
  * comparison are anchored on the bot's own live position, matching every
  * other findNearestHostile call site in this codebase
- * (PlayerIntentionKillNode/TaskController) -- this was previously the
+ * (KillTask/TaskController) -- this was previously the
  * one outlier searching/ranking around the defend target's position
  * instead, which is the bug this docstring update corrects.
  *
  * Line of sight only gates ACQUIRING a new threat, not keeping one --
  * EntityFinder.findNearestVisibleHostile (not the plain
- * findNearestHostile PlayerIntentionKillNode/TaskController still use)
+ * findNearestHostile KillTask/TaskController still use)
  * requires a clear eye-to-eye line of sight when picking nearestThreat
  * each tick, so DEFEND never locks onto a hostile it has no real line to
  * in the first place -- an underground/behind-terrain zombie, for

@@ -7,11 +7,10 @@ package minebot.mod.statemachine.playerintention;
  * once "General" as a name started inviting unrelated concerns to be
  * dumped into this axis just because they didn't obviously belong
  * anywhere else -- PlayerIntentionState is what this axis actually
- * tracks: the player's own standing goal (IDLE/FOLLOW/DEFEND), plus KILL
- * as the one incidental trigger that still lives here. Built node by
- * node, not all at once (see STATE_MACHINE.md's "Implementation order");
- * more states (FARMING, BUILDING, ...) get added as real behaviors that
- * need them are ported in.
+ * tracks: the player's own standing goal (IDLE/FOLLOW/DEFEND). Built node
+ * by node, not all at once (see STATE_MACHINE.md's "Implementation
+ * order"); more states (FARMING, BUILDING, ...) get added as real
+ * behaviors that need them are ported in.
  *
  * DEAD/GO_TO_DEATH_POSITION/PICKUP_ITEMS are deliberately NOT states on
  * this axis (an earlier version had all three here -- see git history) --
@@ -35,22 +34,23 @@ package minebot.mod.statemachine.playerintention;
  * never transitions because of dying, so there's nothing left for
  * anything to accidentally clobber.
  *
- * KILL is the one remaining INCIDENTAL state -- distinct from
- * PlayerIntention (see its own docstring), which is the player's
- * constant, event-driven goal (IDLE/FOLLOW/DEFEND) that only changes on a
- * real command. KILL transitions back to whatever PlayerIntention
- * currently says once its own isFinished() reports true.
- *
- * KILL (!kill) is reachable from IDLE/FOLLOW/DEFEND, resolves its target
- * from whichever Command.Kill triggered entry (see
- * PlayerIntentionKillNode's own docstring), and exits straight back to
- * intention once the target dies/can't be resolved -- a genuine one-shot
- * task, not an ongoing "keep fighting" mode: a self-loop lets a fresh
- * !kill re-target while already fighting, but nothing auto-re-engages
- * once a kill finishes.
+ * KILL (!kill) is deliberately NOT on this axis, same reasoning SLEEP
+ * below already documents -- an earlier version had it here as the one
+ * remaining INCIDENTAL state (a one-shot trigger, distinct from
+ * PlayerIntention's own standing goal, that transitioned back to
+ * whichever of IDLE/FOLLOW/DEFEND was active once its own isFinished()
+ * reported true), removed per the same "walk over there and do a thing,
+ * then be done" reasoning that moved SLEEP off this axis: a kill has a
+ * genuine start/finish and was never actually a standing goal needing to
+ * interrupt/resume IDLE/FOLLOW/DEFEND, just modeled that way because Task
+ * didn't exist yet when it was first built. Now KillTask, queued the same
+ * way GiveTask/SleepTask are -- see task/KillTask's own docstring, and
+ * TaskController's for how a fresh !kill mid-fight re-targets the current
+ * KillTask in place rather than queuing a second one behind it (the
+ * queue-model replacement for what used to be a KILL->KILL self-loop).
  *
  * SLEEP (!sleep) is deliberately NOT on this axis at all -- an earlier
- * version had it here as a one-shot trigger mirroring KILL's shape
+ * version had it here as a one-shot trigger mirroring KILL's old shape
  * (walk to a bed, sleep, resume whatever intention already said), removed
  * per explicit direction ("implement it more like !give, which is a task
  * in a queue"): "walk to a bed and sleep" has no need to ever interrupt
@@ -59,22 +59,27 @@ package minebot.mod.statemachine.playerintention;
  * lives in TaskController's queue instead, the same home !give's
  * GiveTask already established.
  *
- * DEFEND (!defend), unlike KILL, IS a real standing PlayerIntention value
- * -- "protect this entity from hostiles" (or the bot itself, if no
- * argument) is a goal the player is describing, not an incidental
- * interruption. PlayerIntentionDefendNode auto-fights the nearest
- * hostile to the defend target and never leaves DEFEND to do it (see its
- * own docstring -- it reuses the same CombatEngagement logic KILL uses,
- * just without a separate state transition), re-arming for the next
- * threat the instant the current one is gone. Only !stop (or !follow/
- * !kill superseding it) ends DEFEND -- notably, dying does NOT end it
- * either (see above).
+ * DEFEND (!defend) IS a real standing PlayerIntention value -- "protect
+ * this entity from hostiles" (or the bot itself, if no argument) is a
+ * goal the player is describing, not an incidental interruption.
+ * PlayerIntentionDefendNode auto-fights the nearest hostile to the
+ * defend target and never leaves DEFEND to do it (see its own docstring
+ * -- it reuses the same CombatEngagement logic KillTask uses, just
+ * without a separate state transition), re-arming for the next threat
+ * the instant the current one is gone. Only !stop (or !follow superseding
+ * it) ends DEFEND -- notably, dying does NOT end it either (see above);
+ * a !kill firing while DEFEND is active runs KillTask alongside it
+ * without touching PlayerIntention at all (see CombatEngagement's own
+ * docstring for how the two share TARGET_ENTITY_ID/SELECTED_WEAPON).
  *
- * KILL/DEFEND both only ever publish the fight target's position/whether
- * it's in range (via NavIntent, same shape FOLLOW already uses) plus
- * which weapon is currently best (CombatEngagement.SELECTED_WEAPON) --
- * Hands:MELEE_ATTACK/DRAW_BOW are what actually act on that, matching
- * the established "this axis decides, Hands acts" split.
+ * KillTask/DEFEND both only ever publish the fight target's position/
+ * whether it's in range (via NavIntent, same shape FOLLOW already uses)
+ * plus which weapon is currently best (CombatEngagement.SELECTED_WEAPON)
+ * -- Hands:MELEE_ATTACK/DRAW_BOW are what actually act on that (gated on
+ * CombatEngagement.TARGET_ENTITY_ID != null, not a PlayerIntentionState
+ * check, now that KILL isn't one -- see HandsStateMachine's own
+ * inCombat), matching the established "this axis/Task decides, Hands
+ * acts" split.
  *
  * NOTE: there is deliberately no SELF_HEAL state on this axis (an
  * earlier version had one, removed -- see git history). Low-health
@@ -97,6 +102,5 @@ package minebot.mod.statemachine.playerintention;
 public enum PlayerIntentionState {
     IDLE,
     FOLLOW,
-    DEFEND,
-    KILL
+    DEFEND
 }

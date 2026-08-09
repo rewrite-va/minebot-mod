@@ -135,7 +135,7 @@ public final class MinebotMod implements ClientModInitializer {
     private final LegsNavigateNode legsNavigateNode = new LegsNavigateNode();
     private final StateMachine<LegsState> legsStateMachine = LegsStateMachine.create(legsNavigateNode);
     private final StateMachine<HeadState> headStateMachine = HeadStateMachine.create(legsStateMachine, playerIntentionStateMachine);
-    private final StateMachine<HandsState> handsStateMachine = HandsStateMachine.create(playerIntentionStateMachine, legsStateMachine);
+    private final StateMachine<HandsState> handsStateMachine = HandsStateMachine.create(legsStateMachine);
     // The generic Task queue described in prompt.txt/TaskController's own
     // docstring -- ticked directly, outside every peer StateMachine, same
     // precedent DeathWatcher/InventoryController's own tick() already
@@ -349,13 +349,16 @@ public final class MinebotMod implements ClientModInitializer {
      * "kill" was the first one reintroduced this way (PlayerIntention:
      * KILL -- originally named COMBAT, renamed once "defend" needed the
      * exact same fighting mechanics with different re-entry semantics --
-     * see CombatEngagement's own docstring); "defend" is PlayerIntention:
-     * DEFEND + the same Hands:MELEE_ATTACK/DRAW_BOW + Head:AIM_AT_TARGET;
-     * "pickup" is Legs:PICKUP_ITEMS (see Command.Pickup's own docstring);
-     * "give" is TaskController's own GiveTask (see its own docstring for
-     * why give is a queued Task rather than another peer-SM axis, unlike
-     * every other command here); "chat" is the one exception with no SM
-     * node/Task behind it at all -- a real vanilla chat send is an
+     * see CombatEngagement's own docstring), later converted to
+     * TaskController's own KillTask (see its own docstring) for the same
+     * reason "give"/"sleep" are Tasks rather than peer-SM axis values;
+     * "defend" is PlayerIntention:DEFEND + the same Hands:MELEE_ATTACK/
+     * DRAW_BOW + Head:AIM_AT_TARGET; "pickup" is Legs:PICKUP_ITEMS (see
+     * Command.Pickup's own docstring); "give"/"sleep"/"kill" are
+     * TaskController's own GiveTask/SleepTask/KillTask (see
+     * TaskController's own docstring for why those are queued Tasks
+     * rather than another peer-SM axis); "chat" is the one exception with
+     * no SM node/Task behind it at all -- a real vanilla chat send is an
      * instant, stateless side effect (see its own case's docstring below
      * for why), never displaced by re-entering it.
      *
@@ -366,10 +369,11 @@ public final class MinebotMod implements ClientModInitializer {
      * PlayerIntention's own docstring for why that's tracked separately
      * from Command/CommandBus: Command is a one-tick signal an edge
      * reacts to once, intention is a standing fact that survives across
-     * many ticks/interruptions). "kill"/"pickup"/"give" deliberately do NOT
-     * touch playerIntention -- all three are one-shot triggers, not
-     * standing goals (see PlayerIntention/PlayerIntentionKillNode/
-     * Command.Pickup/Command.Give's own docstrings).
+     * many ticks/interruptions). "kill"/"pickup"/"give"/"sleep"
+     * deliberately do NOT touch playerIntention -- all four are one-shot
+     * triggers/queued Tasks, not standing goals (see PlayerIntention/
+     * task/KillTask/Command.Pickup/Command.Give/Command.Sleep's own
+     * docstrings).
      */
     private void dispatchMessage(final String type, final JsonObject json) {
         switch (type) {
@@ -396,11 +400,12 @@ public final class MinebotMod implements ClientModInitializer {
                 // as !defend's own target) takes priority when present;
                 // otherwise "query" is a raw entity-type string; both
                 // absent/null means "nearest hostile mob" (see
-                // Command.Kill/PlayerIntentionKillNode's own docstrings).
+                // Command.Kill/KillTask's own docstrings).
                 // Deliberately does NOT touch playerIntention -- !kill is
-                // a one-shot trigger, not a standing goal (see
-                // PlayerIntention's own docstring for why KILL isn't a
-                // PlayerIntention value at all).
+                // read by TaskController.tick() to enqueue a fresh
+                // KillTask (or re-target one already running), the same
+                // queued-Task shape "give"/"sleep" use, not a peer-SM
+                // concern at all (see task/KillTask's own docstring).
                 Integer entityId = json.has("entity_id") && !json.get("entity_id").isJsonNull() ? json.get("entity_id").getAsInt() : null;
                 String query = json.has("query") && !json.get("query").isJsonNull() ? json.get("query").getAsString() : null;
                 commandBus.publish(new Command.Kill(entityId, query));

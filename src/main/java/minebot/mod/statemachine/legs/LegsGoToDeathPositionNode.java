@@ -44,7 +44,7 @@ import net.minecraft.world.phys.Vec3;
  *
  * onEnter publishes NAV_TARGET/NAV_ARRIVED immediately (delegates
  * straight to onTick) rather than waiting for this node's own onTick to
- * run starting next tick -- see PlayerIntentionKillNode's own docstring for
+ * run starting next tick -- see KillTask's own docstring for
  * the live bug this exact gap caused there.
  */
 public final class LegsGoToDeathPositionNode implements StateNode<LegsState> {

@@ -10,16 +10,16 @@ import net.minecraft.world.phys.Vec3;
 /**
  * The real "given a live target entity, do the fighting bookkeeping"
  * logic -- shared by every PlayerIntention state that fights something
- * (PlayerIntentionKillNode for !kill's one-shot fight, PlayerIntentionDefendNode for
+ * (KillTask for !kill's one-shot fight, PlayerIntentionDefendNode for
  * !defend's standing auto-retarget fight), pulled out here rather than
  * duplicated between them (per explicit direction, once !defend needed
  * the exact same target-tracking/kiting/weapon-publishing shape
- * PlayerIntentionKillNode -- then still named GeneralCombatNode -- already had).
+ * KillTask -- then still named GeneralCombatNode -- already had).
  * A plain static-method utility, not a StateNode itself -- it has no
  * state/lifecycle of its own, callers own their own target-resolution
  * strategy and isFinished()/exit semantics entirely.
  *
- * TARGET_ENTITY_ID/SELECTED_WEAPON live here (not on PlayerIntentionKillNode)
+ * TARGET_ENTITY_ID/SELECTED_WEAPON live here (not on KillTask)
  * since neither is KILL-specific anymore -- Hands (HandsMeleeAttackNode/
  * HandsDrawBowNode)/Head (HeadAimAtTargetNode) read whichever of KILL/
  * DEFEND most recently published them, with zero awareness of which one
@@ -173,7 +173,7 @@ public final class CombatEngagement {
         wasFighting = fightingNow;
     }
 
-    /** Publishes real, freshly-computed NAV_TARGET/NAV_ARRIVED/TARGET_ENTITY_ID/SELECTED_WEAPON for `target` -- call every tick (including the tick a fight is first entered, from onEnter, not just onTick -- see PlayerIntentionKillNode's own docstring for the live bug that skipping onEnter caused: a newly-entered node's onTick doesn't run until the NEXT tick, so waiting for it leaves stale data from whatever PlayerIntention state this interrupted visible for one real tick). */
+    /** Publishes real, freshly-computed NAV_TARGET/NAV_ARRIVED/TARGET_ENTITY_ID/SELECTED_WEAPON for `target` -- call every tick (including the tick a fight is first entered, from onEnter, not just onTick -- see KillTask's own docstring for the live bug that skipping onEnter caused: a newly-entered node's onTick doesn't run until the NEXT tick, so waiting for it leaves stale data from whatever PlayerIntention state this interrupted visible for one real tick). */
     public static void publish(final TickContext ctx, final Entity target) {
         Vec3 targetPosition = target.position();
         double distanceToTarget = ctx.player.position().distanceTo(targetPosition);

@@ -126,7 +126,7 @@ import java.util.Optional;
  * onEnter publishes NAV_TARGET/NAV_ARRIVED immediately (via the
  * same resolveAndPublishTarget() helper onTick uses) rather than waiting
  * for this node's own onTick to run starting next tick -- see
- * PlayerIntentionKillNode's own docstring for the live bug this exact gap
+ * KillTask's own docstring for the live bug this exact gap
  * caused there. Doesn't delegate straight to onTick() itself (unlike
  * LegsGoToDeathPositionNode's own simpler fix) since onTick also
  * increments ticksElapsed -- onEnter publishing real data shouldn't also

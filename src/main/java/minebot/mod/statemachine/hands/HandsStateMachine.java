@@ -6,7 +6,6 @@ import minebot.mod.statemachine.StateMachine;
 import minebot.mod.statemachine.StateNode;
 import minebot.mod.statemachine.TickContext;
 import minebot.mod.statemachine.playerintention.CombatEngagement;
-import minebot.mod.statemachine.playerintention.PlayerIntentionState;
 import minebot.mod.statemachine.legs.LegsNavigateNode;
 import minebot.mod.statemachine.legs.LegsState;
 import net.minecraft.world.entity.Entity;
@@ -67,11 +66,12 @@ import java.util.function.Predicate;
  * with a target that just happened to be far away.
  *
  * MELEE_ATTACK, DRAW_BOW and DRAW_CROSSBOW are mutually exclusive, all
- * gated on (PlayerIntention==KILL || PlayerIntention==DEFEND) &&
- * !legsFleeing (either real fighting state -- see PlayerIntentionState's
- * own docstring for why all three drive the same shared
- * CombatEngagement-published facts; see LegsState's own docstring for
- * what FLEE means) -- per explicit direction, Hands stops attacking
+ * gated on CombatEngagement.TARGET_ENTITY_ID != null && !legsFleeing --
+ * a live published target is the real "is a fight actually happening"
+ * fact, true whenever either KillTask or PlayerIntentionDefendNode is
+ * driving CombatEngagement (see its own docstring for why both publish
+ * the same shared facts, with zero awareness on Hands' side of which one
+ * it is) -- per explicit direction, Hands stops attacking
  * entirely the instant Legs is fleeing, regardless of range/line-of-sight
  * to the target: swinging or drawing a bow/crossbow while also trying to
  * retreat works against the retreat itself (DRAW_BOW/DRAW_CROSSBOW in
@@ -123,7 +123,7 @@ public final class HandsStateMachine {
     // distance, not only once maximally far away.
     private static final double EAT_SAFE_DISTANCE = 8.0;
 
-    public static StateMachine<HandsState> create(final StateMachine<PlayerIntentionState> playerIntentionStateMachine, final StateMachine<LegsState> legsStateMachine) {
+    public static StateMachine<HandsState> create(final StateMachine<LegsState> legsStateMachine) {
         // Held by name (not just inlined into `nodes` below) so the
         // canKeepEating predicate can call isBiteStillProtected() on this
         // SAME instance -- see this class's own docstring for why that's
@@ -170,10 +170,7 @@ public final class HandsStateMachine {
         // active combat target it's actively avoiding right now) worth
         // excluding explicitly.
         Predicate<TickContext> blockedByObstacle = ctx -> HandsMineNode.hasBlockToMine(ctx) && !legsFleeing.test(ctx);
-        Predicate<TickContext> inCombat = ctx -> {
-            PlayerIntentionState state = ctx.blackboard.get(playerIntentionStateMachine);
-            return (state == PlayerIntentionState.KILL || state == PlayerIntentionState.DEFEND) && !legsFleeing.test(ctx);
-        };
+        Predicate<TickContext> inCombat = ctx -> ctx.blackboard.get(CombatEngagement.TARGET_ENTITY_ID) != null && !legsFleeing.test(ctx);
         Predicate<TickContext> usingBow = ctx -> {
             InventoryController.Choice weapon = ctx.blackboard.get(CombatEngagement.SELECTED_WEAPON);
             return weapon != null && weapon.kind() == InventoryController.Kind.BOW;
