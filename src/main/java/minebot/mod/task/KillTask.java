@@ -21,14 +21,14 @@ import net.minecraft.world.entity.Entity;
  * docstring) -- this class only owns TARGET RESOLUTION and its own
  * isFinished()/exit semantics, both genuinely specific to !kill.
  *
- * RE-TARGETING: unlike GiveTask/SleepTask, a fresh Command.Kill arriving
- * while a KillTask is already TaskController's current task re-targets the
- * SAME fight, not a second, separate kill queued behind it -- this is
- * exactly what the old KILL->KILL self-loop existed for. Plain FIFO
- * enqueue can't express that, so TaskController.tick() special-cases
- * Command.Kill: if currentTask is already a KillTask, it calls retarget()
- * on it directly instead of enqueueing a new one (see TaskController's own
- * tick() for the actual check).
+ * A fresh Command.Kill arriving while a KillTask is already
+ * TaskController's current task is plain FIFO-enqueued as a SECOND,
+ * separate KillTask behind it, same as every other Task -- per explicit
+ * direction, no re-targeting the in-progress fight in place (see
+ * TaskController's own docstring for why: an earlier version special-
+ * cased this, mirroring the old KILL->KILL self-loop from before !kill
+ * was a Task at all, removed since a queued second kill is the simpler,
+ * preferred behavior).
  *
  * isFinished() once the target dies/is removed/can't be resolved at all --
  * TaskController then just moves on to whatever's next in the queue (or
@@ -73,14 +73,6 @@ public final class KillTask implements Task {
         }
         Entity target = ctx.level.getEntity(targetEntityId);
         publishOrFinish(ctx, target != null && !target.isRemoved() ? target : null);
-    }
-
-    /** Re-resolves the target from a fresh Command.Kill's own entityId/query -- called by TaskController in place of enqueueing a second KillTask when one is already current (see this class's own docstring for why). */
-    void retarget(final TickContext ctx, final Integer entityId, final String query) {
-        finished = false;
-        Entity target = resolveTarget(ctx, entityId, query);
-        targetEntityId = target != null ? target.getId() : -1;
-        publishOrFinish(ctx, target);
     }
 
     private void publishOrFinish(final TickContext ctx, final Entity target) {

@@ -25,15 +25,13 @@ import java.util.function.Consumer;
  * per the same "walk over there and do a thing, then be done" reasoning:
  * neither is a standing intention, just a queued unit of work.
  *
- * KILL is the one exception to "this class has no task-specific
- * knowledge at all" (see tick()'s own Command.Kill handling below): a
- * fresh !kill arriving while a KillTask is already current needs to
- * RE-TARGET that same fight, not queue a second, separate kill behind it
- * -- the queue-model replacement for what used to be PlayerIntionState's
- * own KILL->KILL self-loop. Nothing else needs this (GiveTask/SleepTask
- * have no equivalent "re-issue mid-flight" concept), so it's a narrow,
- * explicit special case rather than a general "tasks can be retargeted"
- * mechanism on the Task interface itself.
+ * A fresh !kill arriving while a KillTask is already current is plain
+ * FIFO-enqueued behind it, same as every other Task -- per explicit
+ * direction, no re-targeting the in-progress fight in place (an earlier
+ * version special-cased Command.Kill to do exactly that, mirroring the
+ * old KILL->KILL self-loop from before !kill was a Task at all; removed
+ * since a queued second kill is simpler and the preferred behavior going
+ * forward -- see git history for the removed special case).
  *
  * Deliberately NOT a peer StateMachine<S>: a Task has no "which state am I
  * in" concept, no Edge table, no notion of ever being re-entered once
@@ -104,7 +102,7 @@ public final class TaskController {
         return queue.size() + (currentTask != null ? 1 : 0);
     }
 
-    /** Call once per client tick. First enqueues a fresh GiveTask/SleepTask/KillTask for every Command.Give/Command.Sleep/Command.Kill seen this tick (the cross-thread handoff CommandBus exists for -- see Command.Give/Command.Sleep/Command.Kill's own docstrings) -- except Command.Kill while currentTask is ALREADY a KillTask, which re-targets it in place instead (see this class's own docstring for why) -- then ticks the current task if there is one (retiring it via onExit the moment it reports isFinished()), otherwise dequeues a fresh one if canDequeueTask() allows it. */
+    /** Call once per client tick. First enqueues a fresh GiveTask/SleepTask/KillTask for every Command.Give/Command.Sleep/Command.Kill seen this tick (the cross-thread handoff CommandBus exists for -- see Command.Give/Command.Sleep/Command.Kill's own docstrings), then ticks the current task if there is one (retiring it via onExit the moment it reports isFinished()), otherwise dequeues a fresh one if canDequeueTask() allows it. */
     public void tick(final TickContext ctx) {
         for (Command command : ctx.commands) {
             if (command instanceof Command.Give give) {
@@ -114,11 +112,7 @@ public final class TaskController {
                 enqueue(new SleepTask());
             }
             if (command instanceof Command.Kill kill) {
-                if (currentTask instanceof KillTask killTask) {
-                    killTask.retarget(ctx, kill.entityId(), kill.query());
-                } else {
-                    enqueue(new KillTask(kill.entityId(), kill.query()));
-                }
+                enqueue(new KillTask(kill.entityId(), kill.query()));
             }
         }
 
