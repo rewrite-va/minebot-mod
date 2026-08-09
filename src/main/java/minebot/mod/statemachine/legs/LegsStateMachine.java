@@ -1,6 +1,7 @@
 package minebot.mod.statemachine.legs;
 
 import minebot.mod.DeathWatcher;
+import minebot.mod.EntityFinder;
 import minebot.mod.InventoryController;
 import minebot.mod.statemachine.Command;
 import minebot.mod.statemachine.Commands;
@@ -8,6 +9,7 @@ import minebot.mod.statemachine.Edge;
 import minebot.mod.statemachine.StateMachine;
 import minebot.mod.statemachine.StateNode;
 import minebot.mod.statemachine.TickContext;
+import minebot.mod.statemachine.playerintention.CombatEngagement;
 import minebot.mod.statemachine.playerintention.NavIntent;
 import minebot.mod.statemachine.hands.HandsEatNode;
 
@@ -84,8 +86,49 @@ import java.util.function.Predicate;
  * per explicit direction, the player retyping !pickup once fleeing ends
  * is an acceptable cost for keeping FLEE's own edges free of a
  * low-priority voluntary interrupt.
+ *
+ * PICKUP_ITEMS is ALSO reachable from IDLE/NAVIGATE the instant a fight
+ * ends with no hostile left in sight -- per explicit direction ("after a
+ * fight and only when no visible monsters, switch to legs:pickup_items,
+ * so the bot pickup drops and arrows"). Detected as an EDGE (fighting
+ * last tick, not fighting this tick), not a level condition, via
+ * CombatEngagement.FIGHT_JUST_ENDED -- reacting to "no fight right now" as
+ * a standing condition would re-trigger a pickup sweep on every single
+ * peaceful IDLE tick forever (nothing keeps it from re-arming the moment
+ * PICKUP_ITEMS finishes and falls back to IDLE with the same
+ * no-fight/no-hostile facts still true), turning this into a permanent
+ * item-vacuum rather than a one-shot post-fight cleanup.
+ * FIGHT_JUST_ENDED itself is computed centrally by CombatEngagement.
+ * tickEdgeDetection (ticked unconditionally every real tick from
+ * MinebotMod, regardless of Legs' own current state) rather than as a
+ * Predicate closure living here -- see its own docstring for the real,
+ * confirmed gap that fixed (Legs missing the transition entirely
+ * whenever a fight starts/ends while Legs itself is in FLEE/
+ * GO_TO_DEATH_POSITION/PICKUP_ITEMS, since edges are only ever evaluated
+ * FROM Legs' own current state). True for BOTH !kill (KILL) and !defend
+ * (DEFEND) fights alike, since both publish TARGET_ENTITY_ID through the
+ * same CombatEngagement.publish/clear (or DEFEND's own equivalent inline
+ * null-out). "No visible monsters" reuses
+ * EntityFinder.findNearestVisibleHostile (not the plain
+ * findNearestHostile PlayerIntentionKillNode's bare !kill fallback uses)
+ * -- same real line-of-sight semantics PlayerIntentionDefendNode already
+ * relies on for "is a threat actually engageable", so a hostile merely
+ * heard/behind a wall doesn't block the sweep from starting. Ranked
+ * BELOW GO_TO_DEATH_POSITION/FLEE (checked after them, same as the
+ * !pickup edges) but does NOT need to rank against the !pickup edges
+ * themselves -- both land on the exact same PICKUP_ITEMS state, so
+ * whichever of the two edges happens to be declared/evaluated first on a
+ * tick where both are true is immaterial. Deliberately NOT reachable
+ * from FLEE, matching !pickup's own edges -- a fight ending WHILE still
+ * fleeing (low health) shouldn't detour into item pickup ahead of
+ * whatever FLEE's own exit edges would otherwise send Legs to.
  */
 public final class LegsStateMachine {
+    // Matches CombatEngagement.SEARCH_RADIUS -- the same "how far could a
+    // fight plausibly have ranged" scope that governed the fight this is
+    // reacting to.
+    private static final double VISIBLE_HOSTILE_RADIUS = CombatEngagement.SEARCH_RADIUS;
+
     private LegsStateMachine() {
     }
 
@@ -107,6 +150,14 @@ public final class LegsStateMachine {
             ctx.blackboard.get(NavIntent.NAV_TARGET) != null && !Boolean.TRUE.equals(ctx.blackboard.get(NavIntent.NAV_ARRIVED));
         Predicate<TickContext> shouldFlee = ctx -> HandsEatNode.lowHealth(ctx) && InventoryController.hasFood(ctx.player);
         Predicate<TickContext> isPickupCommand = ctx -> Commands.has(ctx.commands, Command.Pickup.class);
+        // FIGHT_JUST_ENDED itself is a real edge (fighting last tick, not
+        // fighting this tick) computed centrally by CombatEngagement.
+        // tickEdgeDetection -- see its own docstring for why that can't
+        // just be a Predicate closure living here. The "no visible
+        // monsters" half is still checked locally, fresh, every time --
+        // no need to also cache that centrally, it's a cheap read.
+        Predicate<TickContext> fightJustEnded = ctx -> Boolean.TRUE.equals(ctx.blackboard.get(CombatEngagement.FIGHT_JUST_ENDED))
+            && EntityFinder.findNearestVisibleHostile(ctx.level, ctx.player, VISIBLE_HOSTILE_RADIUS) == null;
 
         List<Edge<LegsState>> edges = List.of(
             // GO_TO_DEATH_POSITION/PICKUP_ITEMS outrank everything -- see
@@ -139,6 +190,13 @@ public final class LegsStateMachine {
             // FLEE.
             new Edge<>(LegsState.IDLE, LegsState.PICKUP_ITEMS, isPickupCommand),
             new Edge<>(LegsState.NAVIGATE, LegsState.PICKUP_ITEMS, isPickupCommand),
+
+            // Post-fight pickup -- see this class's own docstring for why
+            // this is an edge-trigger (FightJustEnded), ranked alongside
+            // !pickup above (below recovery/flee, above the plain
+            // navigate/idle fallback, not reachable from FLEE).
+            new Edge<>(LegsState.IDLE, LegsState.PICKUP_ITEMS, fightJustEnded),
+            new Edge<>(LegsState.NAVIGATE, LegsState.PICKUP_ITEMS, fightJustEnded),
 
             new Edge<>(LegsState.IDLE, LegsState.NAVIGATE, shouldNavigate),
             new Edge<>(LegsState.NAVIGATE, LegsState.IDLE, ctx -> !shouldNavigate.test(ctx))

@@ -16,6 +16,7 @@ import minebot.mod.statemachine.Command;
 import minebot.mod.statemachine.CommandBus;
 import minebot.mod.statemachine.StateMachine;
 import minebot.mod.statemachine.TickContext;
+import minebot.mod.statemachine.playerintention.CombatEngagement;
 import minebot.mod.statemachine.playerintention.PlayerIntentionState;
 import minebot.mod.statemachine.playerintention.PlayerIntentionStateMachine;
 import minebot.mod.statemachine.playerintention.PlayerIntention;
@@ -27,6 +28,8 @@ import minebot.mod.statemachine.legs.LegsNavigateNode;
 import minebot.mod.statemachine.legs.LegsState;
 import minebot.mod.statemachine.legs.LegsStateMachine;
 import minebot.mod.task.TaskController;
+import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.damagesource.DamageTypes;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import org.slf4j.Logger;
@@ -249,6 +252,14 @@ public final class MinebotMod implements ClientModInitializer {
         // evaluates its edges below (see DeathWatcher's own docstring).
         deathWatcher.tick(ctx);
         playerIntentionStateMachine.tick(ctx);
+        // After PlayerIntention (reads its just-published TARGET_ENTITY_ID
+        // this same tick) but before Legs (FIGHT_JUST_ENDED must already
+        // be visible by the time Legs evaluates its own post-fight
+        // PICKUP_ITEMS edge below) -- same standalone-tick precedent
+        // deathWatcher.tick's own placement above establishes, see
+        // CombatEngagement.FIGHT_JUST_ENDED's own docstring for why this
+        // can't just be a Predicate closure living on Legs instead.
+        CombatEngagement.tickEdgeDetection(ctx);
         // After PlayerIntention (isBusy() reads its just-published DEFEND
         // state this same tick) but before Legs (a task's own published
         // NAV_TARGET must already be visible by the time Legs evaluates
@@ -280,8 +291,18 @@ public final class MinebotMod implements ClientModInitializer {
 
         float health = player.getHealth();
         if (health != lastReportedHealth) {
+            boolean tookDamage = health < lastReportedHealth;
             lastReportedHealth = health;
             broadcastHealthEvent(health);
+            // getLastDamageSource() is read the same tick as the health
+            // drop it corresponds to, well inside the 40-tick (2s) window
+            // LivingEntity self-clears it after -- see its own field doc.
+            // Only meaningful on an actual drop: a rise (eating/regen)
+            // never has a fresh DamageSource behind it, and reading a
+            // stale one here would misattribute it to this tick's change.
+            if (tookDamage) {
+                broadcastDamageEvent(player.getLastDamageSource());
+            }
         }
     }
 
@@ -514,6 +535,42 @@ public final class MinebotMod implements ClientModInitializer {
         JsonObject event = new JsonObject();
         event.addProperty("type", "health");
         event.addProperty("health", health);
+        controlClient.sendEvent(event.toString());
+    }
+
+    /**
+     * Fires once per real health drop (never on a rise), carrying WHAT hit
+     * us -- something the plain health event can't express (it's just a
+     * polled/diffed float, no cause). `source` can genuinely be null: the
+     * game can dock health (or LivingEntity can fail to have recorded a
+     * DamageSource in time -- see getLastDamageSource()'s own 40-tick
+     * expiry) without one, so "hostile" only reports true when a source
+     * was actually available AND matches a monster/player-attack damage
+     * type; anything else (fall, fire, drown, unknown/null) reports false
+     * rather than guessing. Python-side auto-defend deliberately only
+     * reacts to hostile=true, so a bot that face-plants off a cliff
+     * doesn't spuriously enter combat stance over fall damage.
+     */
+    private void broadcastDamageEvent(final DamageSource source) {
+        boolean hostile = source != null && (
+            source.is(DamageTypes.MOB_ATTACK)
+                || source.is(DamageTypes.MOB_ATTACK_NO_AGGRO)
+                || source.is(DamageTypes.PLAYER_ATTACK)
+                || source.is(DamageTypes.MOB_PROJECTILE)
+                || source.is(DamageTypes.ARROW)
+                || source.is(DamageTypes.TRIDENT)
+                || source.is(DamageTypes.STING)
+                || source.is(DamageTypes.SPEAR)
+                || source.is(DamageTypes.MACE_SMASH)
+                || source.is(DamageTypes.THORNS)
+        );
+
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "damage");
+        event.addProperty("hostile", hostile);
+        event.addProperty("cause", source != null ? source.type().msgId() : null);
+        Entity attacker = source != null ? source.getEntity() : null;
+        event.addProperty("attacker", attacker != null ? attacker.getName().getString() : null);
         controlClient.sendEvent(event.toString());
     }
 

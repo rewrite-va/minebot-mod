@@ -142,6 +142,37 @@ public final class CombatEngagement {
     /** InventoryController's own Choice for the CURRENT tick, or null if nothing beats bare hands -- see this class's own docstring for why this is computed once here and shared. */
     public static final BlackboardKey<InventoryController.Choice> SELECTED_WEAPON = new BlackboardKey<>("SELECTED_WEAPON");
 
+    /**
+     * True on exactly the one tick TARGET_ENTITY_ID transitions from
+     * non-null to null (a fight just ended), false every other tick --
+     * backs LegsStateMachine's own post-fight PICKUP_ITEMS trigger (see
+     * its own docstring). Computed here, by tickEdgeDetection() below,
+     * rather than as a plain Predicate closure living on Legs itself (an
+     * earlier version did exactly that) -- confirmed that approach has a
+     * real gap: Predicate.test() there only ever runs when Legs evaluates
+     * an edge FROM its own current state, so it silently misses every
+     * fight-ends-while-Legs-is-elsewhere case (FLEE, GO_TO_DEATH_POSITION,
+     * PICKUP_ITEMS already fighting-adjacent) -- e.g. a fight ending while
+     * Legs is fleeing on low health would never observe the transition,
+     * leaving the "was fighting" bit stale for whatever real transition
+     * happens to be checked next, misfiring or missing entirely. Fixed by
+     * moving detection here and ticking it unconditionally every real
+     * tick from MinebotMod's own top-level loop (same standalone-tick
+     * precedent DeathWatcher already established for exactly this reason
+     * -- see its own docstring), regardless of what any SM's current
+     * state is.
+     */
+    public static final BlackboardKey<Boolean> FIGHT_JUST_ENDED = new BlackboardKey<>("FIGHT_JUST_ENDED");
+
+    private static boolean wasFighting;
+
+    /** Call once per real tick, unconditionally, after PlayerIntention's own StateMachine.tick() (so this observes that tick's freshly-published TARGET_ENTITY_ID) and before Legs' (so Legs sees FIGHT_JUST_ENDED the same tick it actually happens, not one tick late) -- see FIGHT_JUST_ENDED's own docstring for why this can't just live as a Predicate closure on Legs instead. */
+    public static void tickEdgeDetection(final TickContext ctx) {
+        boolean fightingNow = ctx.blackboard.get(TARGET_ENTITY_ID) != null;
+        ctx.blackboard.put(FIGHT_JUST_ENDED, wasFighting && !fightingNow);
+        wasFighting = fightingNow;
+    }
+
     /** Publishes real, freshly-computed NAV_TARGET/NAV_ARRIVED/TARGET_ENTITY_ID/SELECTED_WEAPON for `target` -- call every tick (including the tick a fight is first entered, from onEnter, not just onTick -- see PlayerIntentionKillNode's own docstring for the live bug that skipping onEnter caused: a newly-entered node's onTick doesn't run until the NEXT tick, so waiting for it leaves stale data from whatever PlayerIntention state this interrupted visible for one real tick). */
     public static void publish(final TickContext ctx, final Entity target) {
         Vec3 targetPosition = target.position();

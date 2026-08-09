@@ -2,10 +2,9 @@ package minebot.mod.statemachine.legs;
 
 import minebot.mod.DeathWatcher;
 import minebot.mod.mixin.AbstractArrowAccessor;
-import minebot.mod.statemachine.Command;
-import minebot.mod.statemachine.Commands;
 import minebot.mod.statemachine.StateNode;
 import minebot.mod.statemachine.TickContext;
+import minebot.mod.statemachine.playerintention.CombatEngagement;
 import minebot.mod.statemachine.playerintention.NavIntent;
 import net.minecraft.core.Holder;
 import net.minecraft.core.registries.Registries;
@@ -25,8 +24,10 @@ import java.util.Optional;
 
 /**
  * Walks to a dropped item (or a pickable ground arrow), over and over,
- * until none remain within RADIUS of a committed anchor position --
- * Minecraft auto-picks-up items just by walking close enough to them (no
+ * until none remain within this activation's own committed radius (see
+ * resolveRadius's own docstring for why the radius itself varies by
+ * trigger) of a committed anchor position -- Minecraft auto-picks-up
+ * items just by walking close enough to them (no
  * explicit interact needed, confirmed by ItemDropTracker's own docstring/
  * existing use of the same entitiesForRendering()-filtered scan this
  * reuses), so "recover the items" is really just "keep walking toward
@@ -49,9 +50,10 @@ import java.util.Optional;
  * client-side data allows -- see its own docstring for why it can't be
  * exact.
  *
- * Two distinct triggers share this same node, per explicit direction that
- * !pickup should reuse the death-recovery mechanics rather than duplicate
- * them:
+ * Three distinct triggers share this same node, per explicit direction
+ * that !pickup should reuse the death-recovery mechanics rather than
+ * duplicate them (the post-fight trigger below then reused that same
+ * "no dedicated anchor" fallback rather than inventing a third one):
  * - Death recovery (see LegsStateMachine's own docstring) -- entered
  *   straight from GO_TO_DEATH_POSITION once it finishes; the anchor is
  *   DeathWatcher.DEATH_POSITION, already known by the time this node's
@@ -63,12 +65,16 @@ import java.util.Optional;
  *   Command.Pickup's own docstring for why), since there's no "walk back
  *   somewhere first" step the way death recovery has -- !pickup means
  *   "grab whatever's near me right now".
- * anchor() below picks whichever of the two applies -- Commands.has(ctx.
- * commands, Command.Pickup.class) is only ever true on the exact tick a
- * fresh !pickup arrives, which is also the only tick this node's onEnter
- * could be running because OF that command (the death-recovery entry
- * path never has a Command.Pickup present), so checking it in onEnter is
- * enough to disambiguate correctly without any extra bookkeeping.
+ * - Post-fight sweep (see LegsStateMachine's own FightJustEnded docstring)
+ *   -- entered directly from IDLE/NAVIGATE the instant a fight ends with
+ *   no hostile left visible; same "grab whatever's near me right now"
+ *   anchor as !pickup, since a fight can end anywhere, not just at a
+ *   remembered death spot.
+ * resolveAnchor() below picks whichever applies -- DeathWatcher.
+ * DEATH_POSITION being non-null means death recovery (the only trigger
+ * that ever sets it), anything else (both !pickup and the post-fight
+ * sweep alike) falls back to the bot's own live position, since neither
+ * has -- or needs -- a distinct anchor of its own.
  *
  * Commits to a single target entity (targetItemId) once picked, and
  * keeps walking toward THAT SAME entity every tick until it's gone
@@ -85,8 +91,9 @@ import java.util.Optional;
  * from under a remembered list anyway, so a live re-scan each time a
  * target is needed is simpler and just as correct as maintaining one.
  *
- * Scoped to RADIUS around the committed anchor (not the bot's own
- * current, continuously-changing position) so this doesn't chase an item
+ * Scoped to this activation's own committed radius around the committed
+ * anchor (not the bot's own current, continuously-changing position) so
+ * this doesn't chase an item
  * that scattered far away (rolled down a slope, swept off by water)
  * indefinitely -- once outside that radius, an item is treated as
  * unrecoverable, matching "recover items on the floor near [the anchor]",
@@ -130,13 +137,29 @@ public final class LegsPickupItemsNode implements StateNode<LegsState> {
     // Widened from an initial 8.0 -- confirmed live that a fall/explosion
     // death can scatter items (physics-flung, or rolling down terrain)
     // well past 8 blocks from the actual death spot, leaving them
-    // unreachable/ignored under the old radius.
-    private static final double RADIUS = 16.0;
+    // unreachable/ignored under the old radius. Also the default for
+    // !pickup -- a voluntary "grab whatever's near me" with no fight to
+    // have scattered anything further.
+    private static final double DEFAULT_RADIUS = 16.0;
+    // Post-fight sweep specifically gets a wider radius than every other
+    // trigger -- per explicit direction ("fights could scatter drops
+    // everywhere"): a kited/kiting fight (see CombatEngagement's own
+    // docstring for why the bot itself repositions constantly while
+    // fighting) can end well away from where a mob actually died, and
+    // knockback/explosions (creeper) scatter drops further still. Matches
+    // CombatEngagement.SEARCH_RADIUS -- the same "how far this fight could
+    // plausibly have ranged" scope LegsStateMachine's own visible-hostile
+    // check already reuses for the identical reason.
+    private static final double POST_FIGHT_RADIUS = CombatEngagement.SEARCH_RADIUS;
     private static final double ARRIVAL_DISTANCE = 0.3;
     // Widened alongside RADIUS -- 10s was tuned for items clustered right
-    // at the death spot; a 16-block radius can need several long walks in
-    // a row to reach everything, so the same short timeout would cut
-    // recovery off early.
+    // at the death spot; a wide radius can need several long walks in a
+    // row to reach everything, so the same short timeout would cut
+    // recovery off early. Shared by every trigger, including the wider
+    // POST_FIGHT_RADIUS one -- TIMEOUT_TICKS was already sized for
+    // RADIUS==16 needing "several long walks", and POST_FIGHT_RADIUS
+    // (32) is the same order of magnitude, not a step change that would
+    // need its own separate timeout tuning.
     private static final int TIMEOUT_TICKS = 600; // ~30 seconds
 
     // -1 means "no committed target right now" -- distinct from a real
@@ -148,6 +171,12 @@ public final class LegsPickupItemsNode implements StateNode<LegsState> {
     // docstring for the two ways it gets resolved. Null only defensively
     // (see resolveAndPublishTarget's own null check).
     private Vec3 anchor;
+    // The committed search radius for THIS activation -- resolved
+    // alongside anchor in onEnter, same "decide once per activation, read
+    // fresh every tick after" shape (a mid-sweep fight somehow starting
+    // and ending again shouldn't retroactively widen/narrow an
+    // already-committed sweep).
+    private double radius;
 
     @Override
     public void onEnter(final TickContext ctx, final LegsState previousState) {
@@ -155,6 +184,7 @@ public final class LegsPickupItemsNode implements StateNode<LegsState> {
         ticksElapsed = 0;
         finished = false;
         anchor = resolveAnchor(ctx);
+        radius = resolveRadius(ctx);
         resolveAndPublishTarget(ctx);
     }
 
@@ -165,12 +195,30 @@ public final class LegsPickupItemsNode implements StateNode<LegsState> {
         finished = finished || ticksElapsed >= TIMEOUT_TICKS;
     }
 
-    /** See this class's own docstring for why Command.Pickup being present this tick is enough to disambiguate which trigger caused entry, with no extra bookkeeping needed. */
+    /** See this class's own docstring for why Command.Pickup being present this tick is enough to disambiguate which trigger caused entry, with no extra bookkeeping needed. Falls back to the bot's own live position (same anchor !pickup itself uses) whenever DEATH_POSITION is also unset -- the post-fight trigger (see LegsStateMachine's own docstring) lands here the same way !pickup does, with no death to recover from and no anchor of its own, so "grab whatever's near me right now" is the correct read for it too. */
     private static Vec3 resolveAnchor(final TickContext ctx) {
-        if (Commands.has(ctx.commands, Command.Pickup.class)) {
-            return ctx.player.position();
+        Vec3 deathPosition = ctx.blackboard.get(DeathWatcher.DEATH_POSITION);
+        if (deathPosition != null) {
+            return deathPosition;
         }
-        return ctx.blackboard.get(DeathWatcher.DEATH_POSITION);
+        return ctx.player.position();
+    }
+
+    /**
+     * The post-fight trigger gets POST_FIGHT_RADIUS, every other trigger
+     * (death recovery, !pickup) gets DEFAULT_RADIUS -- see those
+     * constants' own comments for why. Disambiguated the same way
+     * resolveAnchor's own DEATH_POSITION check works: CombatEngagement.
+     * FIGHT_JUST_ENDED is a one-tick pulse (see its own docstring) that's
+     * only ever true on the exact tick LegsStateMachine's matching edge
+     * fires, which is also the only tick this node's onEnter could be
+     * running because of it -- so reading it here, once, is enough to
+     * disambiguate correctly, no separate bookkeeping needed, same
+     * precedent Command.Pickup's own onEnter-only check already
+     * established.
+     */
+    private static double resolveRadius(final TickContext ctx) {
+        return Boolean.TRUE.equals(ctx.blackboard.get(CombatEngagement.FIGHT_JUST_ENDED)) ? POST_FIGHT_RADIUS : DEFAULT_RADIUS;
     }
 
     private void resolveAndPublishTarget(final TickContext ctx) {
@@ -230,8 +278,8 @@ public final class LegsPickupItemsNode implements StateNode<LegsState> {
         return null;
     }
 
-    /** Same entitiesForRendering()-filtered scan ItemDropTracker already uses -- see this class's own docstring for why (naturally bounded by render/simulation distance, no separate bounded-AABB search needed). Nearest to the BOT (not to the anchor) so each newly-committed hop is as short as possible -- the anchor only bounds the eligible RADIUS, not which of the eligible candidates gets picked. */
-    private static Entity nearestPickableToPlayer(final TickContext ctx, final Vec3 anchor) {
+    /** Same entitiesForRendering()-filtered scan ItemDropTracker already uses -- see this class's own docstring for why (naturally bounded by render/simulation distance, no separate bounded-AABB search needed). Nearest to the BOT (not to the anchor) so each newly-committed hop is as short as possible -- the anchor only bounds the eligible radius, not which of the eligible candidates gets picked. `radius` is this activation's own committed value (resolveRadius(), NOT a shared constant -- see its own docstring for why it varies by trigger). */
+    private Entity nearestPickableToPlayer(final TickContext ctx, final Vec3 anchor) {
         Vec3 selfPosition = ctx.player.position();
         Entity nearest = null;
         double nearestDistanceSq = Double.MAX_VALUE;
@@ -241,7 +289,7 @@ public final class LegsPickupItemsNode implements StateNode<LegsState> {
             if (!eligible) {
                 continue;
             }
-            if (entity.position().distanceToSqr(anchor) > RADIUS * RADIUS) {
+            if (entity.position().distanceToSqr(anchor) > radius * radius) {
                 continue;
             }
             double distanceSq = entity.position().distanceToSqr(selfPosition);
