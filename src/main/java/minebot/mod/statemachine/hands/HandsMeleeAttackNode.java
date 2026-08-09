@@ -6,8 +6,11 @@ import minebot.mod.statemachine.StateNode;
 import minebot.mod.statemachine.TickContext;
 import minebot.mod.statemachine.playerintention.CombatEngagement;
 import net.minecraft.client.Minecraft;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.component.PiercingWeapon;
 
 /**
  * Swings at CombatEngagement's live target (whichever PlayerIntention:KILL/
@@ -95,7 +98,34 @@ public final class HandsMeleeAttackNode implements StateNode<HandsState> {
         swing(ctx, target);
     }
 
+    /**
+     * A spear (any item carrying DataComponents.PIERCING_WEAPON, per real
+     * vanilla's own gate -- see Minecraft.startAttack()'s decompiled
+     * source) thrusts instead of swinging: the real client-parity call is
+     * PiercingWeapon.attack() server/logical-side via a STAB player-action
+     * packet (MultiPlayerGameMode.piercingAttack), NOT
+     * gameMode.attack(player, entity) -- that path does its own raycast
+     * along the weapon's real AttackRange and can hit multiple entities
+     * along the thrust line, so (matching real vanilla) it doesn't even
+     * need `target` to be the exact crosshair hit -- CombatEngagement
+     * already ensured the bot is standing at a distance where the target
+     * falls inside the spear's own min/max reach band, so calling this
+     * once fully charged (same charge gate as a sword swing above) is
+     * enough for `target` to actually get hit by the thrust.
+     */
     private static void swing(final TickContext ctx, final Entity target) {
+        ItemStack heldItem = ctx.player.getMainHandItem();
+        PiercingWeapon piercingWeapon = heldItem.get(DataComponents.PIERCING_WEAPON);
+        if (piercingWeapon != null) {
+            Minecraft.getInstance().gameMode.piercingAttack(piercingWeapon);
+            ctx.player.swing(InteractionHand.MAIN_HAND);
+            MinebotMod.LOGGER.info(
+                "hands: spear thrust toward entity {} ({}) -- attackStrengthDelay={}",
+                target.getId(), target.getType(), ctx.player.getCurrentItemAttackStrengthDelay()
+            );
+            return;
+        }
+
         Minecraft.getInstance().gameMode.attack(ctx.player, target);
         ctx.player.swing(InteractionHand.MAIN_HAND);
         MinebotMod.LOGGER.info(

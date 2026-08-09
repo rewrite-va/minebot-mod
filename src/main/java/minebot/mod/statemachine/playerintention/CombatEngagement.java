@@ -3,8 +3,11 @@ package minebot.mod.statemachine.playerintention;
 import minebot.mod.InventoryController;
 import minebot.mod.statemachine.BlackboardKey;
 import minebot.mod.statemachine.TickContext;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.component.AttackRange;
 import net.minecraft.world.phys.Vec3;
 
 /**
@@ -184,25 +187,62 @@ public final class CombatEngagement {
 
         boolean usingRanged = weapon != null
             && (weapon.kind() == InventoryController.Kind.BOW || weapon.kind() == InventoryController.Kind.CROSSBOW);
+        boolean usingSpear = weapon != null && weapon.kind() == InventoryController.Kind.SPEAR;
+        // Spear's own real per-item reach band (see collectMeleeCandidates'
+        // own docstring for why this can't just reuse the flat
+        // ENTITY_INTERACTION_RANGE attribute every other melee weapon
+        // uses) -- weapon.slot() is trusted here the same way
+        // HandsMeleeAttackNode trusts SELECTED_WEAPON's slot, since both
+        // read the exact same Choice computed by findBestWeapon just above.
+        AttackRange spearRange = usingSpear
+            ? ctx.player.getAttackRangeWith(ctx.player.getInventory().getItem(weapon.slot()))
+            : null;
         double meleeRange = ctx.player.getAttributeValue(Attributes.ENTITY_INTERACTION_RANGE);
-        double range = usingRanged ? BOW_RANGE : meleeRange;
+        // Spear engage/hold distance: the band's own maxReach -- far
+        // enough that closing distance (a target approaching, or the bot
+        // drifting) is more likely to still land inside the band than to
+        // fall short of minReach, and matches the same "hold at the edge
+        // of range" shape BOW_RANGE already uses for ranged weapons,
+        // rather than sitting at a midpoint the target can just as easily
+        // close past on either side. Simply walking onto the target like a
+        // sword/axe would still put the bot inside minReach's own dead
+        // zone (AttackRange.isInRange rejects a hit that's too close, same
+        // as one that's too far), so this is never the target's own
+        // position.
+        double spearHoldDistance = usingSpear ? spearRange.maxReach() : 0.0;
+        double range = usingRanged ? BOW_RANGE : (usingSpear ? spearRange.maxReach() : meleeRange);
 
         boolean shouldRetreat = usingRanged
             ? distanceToTarget < meleeRange
-            : distanceToTarget <= meleeRange && ctx.player.getAttackStrengthScale(0.0f) < MELEE_RETREAT_CHARGE_THRESHOLD;
+            : usingSpear
+                ? distanceToTarget < spearRange.minReach()
+                : distanceToTarget <= meleeRange && ctx.player.getAttackStrengthScale(0.0f) < MELEE_RETREAT_CHARGE_THRESHOLD;
 
         Vec3 navPosition;
         boolean withinRange;
         if (shouldRetreat) {
-            double retreatDistance = usingRanged ? BOW_RETREAT_DISTANCE : meleeRange;
+            double retreatDistance = usingRanged ? BOW_RETREAT_DISTANCE : (usingSpear ? spearHoldDistance : meleeRange);
             navPosition = retreatPoint(ctx, targetPosition, retreatDistance);
             withinRange = ctx.player.position().distanceTo(navPosition) <= RETREAT_ARRIVAL_DISTANCE;
+        } else if (usingSpear) {
+            // Approach/hold at spearHoldDistance (the band's own maxReach)
+            // rather than walking onto the target -- same reasoning as the
+            // retreat branch above, just for the non-retreating case.
+            navPosition = retreatPoint(ctx, targetPosition, spearHoldDistance);
+            withinRange = spearRange.isInRange(ctx.player, targetPosition);
         } else {
             navPosition = targetPosition;
             withinRange = distanceToTarget <= range;
         }
 
-        ctx.blackboard.put(NavIntent.NAV_TARGET, new NavIntent.Target(navPosition, shouldRetreat ? RETREAT_ARRIVAL_DISTANCE : range));
+        // navPosition is a computed stand-off point (not the target's own
+        // position) for both the retreat branch and the spear-hold branch
+        // above -- both need Legs to walk to that exact point rather than
+        // stopping "close enough" the way it does when navPosition IS the
+        // target (a loose tolerance there would let Legs stop short of the
+        // hold point, inside the spear's own minReach dead zone).
+        double stopDistance = shouldRetreat || usingSpear ? RETREAT_ARRIVAL_DISTANCE : range;
+        ctx.blackboard.put(NavIntent.NAV_TARGET, new NavIntent.Target(navPosition, stopDistance));
         ctx.blackboard.put(NavIntent.NAV_ARRIVED, withinRange);
     }
 

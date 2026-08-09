@@ -10,6 +10,7 @@ import minebot.mod.statemachine.legs.LegsNavigateNode;
 import minebot.mod.statemachine.legs.LegsState;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.item.component.AttackRange;
 
 import java.util.List;
 import java.util.Map;
@@ -190,6 +191,19 @@ public final class HandsStateMachine {
             Entity target = ctx.level.getEntity(targetEntityId);
             if (target == null) {
                 return false;
+            }
+            InventoryController.Choice weapon = ctx.blackboard.get(CombatEngagement.SELECTED_WEAPON);
+            // A spear's real reach band has a nonzero minReach (see
+            // InventoryController.collectMeleeCandidates' own docstring),
+            // so "in range" for one needs the real per-item AttackRange
+            // (which enforces both bounds via isInRange), not the flat
+            // ENTITY_INTERACTION_RANGE attribute every other melee weapon
+            // uses -- trusting that flat attribute for a spear would let
+            // MELEE_ATTACK think it's in range while standing well inside
+            // the spear's own dead zone, where a thrust simply misses.
+            if (weapon != null && weapon.kind() == InventoryController.Kind.SPEAR) {
+                AttackRange spearRange = ctx.player.getAttackRangeWith(ctx.player.getInventory().getItem(weapon.slot()));
+                return spearRange.isInRange(ctx.player, target.position());
             }
             double meleeRange = ctx.player.getAttributeValue(Attributes.ENTITY_INTERACTION_RANGE);
             return ctx.player.position().distanceTo(target.position()) <= meleeRange;

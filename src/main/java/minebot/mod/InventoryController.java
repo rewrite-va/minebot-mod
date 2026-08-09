@@ -23,6 +23,7 @@ import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.component.AttackRange;
 import net.minecraft.world.item.component.ItemAttributeModifiers;
 import net.minecraft.world.item.equipment.Equippable;
 import net.minecraft.world.level.block.state.BlockState;
@@ -76,7 +77,14 @@ public final class InventoryController {
     private InventoryController() {
     }
 
-    public enum Kind { BOW, CROSSBOW, MELEE }
+    // SPEAR is its own Kind (not lumped into MELEE) because it carries a
+    // real per-item DataComponents.ATTACK_RANGE with a nonzero minReach --
+    // see WeaponCandidate/collectMeleeCandidates below for why every
+    // consumer that cares about engagement distance (CombatEngagement's
+    // kiting, HandsStateMachine's inMeleeAttackRange) needs to know "this
+    // has a minimum standoff distance", not just a maximum one, which a
+    // plain MELEE tag can't express.
+    public enum Kind { BOW, CROSSBOW, MELEE, SPEAR }
 
     public record Choice(Kind kind, int slot) {
     }
@@ -272,11 +280,15 @@ public final class InventoryController {
 
     /**
      * One fightable candidate: a real slot, its Kind, how much damage it
-     * deals, and the max distance it can actually reach a target from.
-     * Purely a scoring intermediate for findBestWeapon below -- never
-     * escapes this class.
+     * deals, and the range band it can actually reach a target from.
+     * minRange is 0 for every Kind except SPEAR (see collectMeleeCandidates
+     * for why only spears carry a nonzero minReach) -- kept on every
+     * candidate uniformly rather than only on SPEAR ones so findBestWeapon's
+     * own range filter below doesn't need a Kind-specific branch. Purely a
+     * scoring intermediate for findBestWeapon below -- never escapes this
+     * class.
      */
-    private record WeaponCandidate(Kind kind, int slot, double damage, double maxRange) {
+    private record WeaponCandidate(Kind kind, int slot, double damage, double minRange, double maxRange) {
     }
 
     /**
@@ -338,7 +350,7 @@ public final class InventoryController {
 
         WeaponCandidate best = null;
         for (WeaponCandidate candidate : candidates) {
-            if (candidate.maxRange() < distanceToTarget) {
+            if (candidate.maxRange() < distanceToTarget || distanceToTarget < candidate.minRange()) {
                 continue;
             }
             if (best == null || candidate.damage() > best.damage()) {
@@ -385,15 +397,37 @@ public final class InventoryController {
                 continue;
             }
             if (stack.getItem() instanceof BowItem && !player.getProjectile(stack).isEmpty()) {
-                out.add(new WeaponCandidate(Kind.BOW, slot, attackDamageOf(stack), BOW_RANGE));
+                out.add(new WeaponCandidate(Kind.BOW, slot, attackDamageOf(stack), 0.0, BOW_RANGE));
             } else if (stack.getItem() instanceof CrossbowItem
                 && (CrossbowItem.isCharged(stack) || !player.getProjectile(stack).isEmpty())) {
-                out.add(new WeaponCandidate(Kind.CROSSBOW, slot, attackDamageOf(stack), BOW_RANGE));
+                out.add(new WeaponCandidate(Kind.CROSSBOW, slot, attackDamageOf(stack), 0.0, BOW_RANGE));
             }
         }
     }
 
-    /** Every carried melee-capable stack as a WeaponCandidate (damage + DEFAULT_MELEE_RANGE), appended to `out` -- mirrors maybeSwitchToBestTool's shape (BlockBreaker) for mining tools, but reads real attack-damage data instead of destroy speed: modern vanilla (confirmed via decompiled ItemStack/AttributeModifiers source) has no per-item "damage" field on the Item class itself -- weapon damage is entirely data-driven through ItemAttributeModifiers, the same "Tool component instead of a PickaxeItem subclass" pattern mining tools use. */
+    /**
+     * Every carried melee-capable stack as a WeaponCandidate, appended to
+     * `out` -- mirrors maybeSwitchToBestTool's shape (BlockBreaker) for
+     * mining tools, but reads real attack-damage data instead of destroy
+     * speed: modern vanilla (confirmed via decompiled ItemStack/
+     * AttributeModifiers source) has no per-item "damage" field on the
+     * Item class itself -- weapon damage is entirely data-driven through
+     * ItemAttributeModifiers, the same "Tool component instead of a
+     * PickaxeItem subclass" pattern mining tools use.
+     *
+     * Spears (and anything else carrying a real DataComponents.ATTACK_RANGE
+     * component -- confirmed via decompiled Item.java that vanilla 26.1.2
+     * spears are plain Items built with Item.Properties.spear(...), not a
+     * dedicated SpearItem subclass, so this is the only reliable way to
+     * detect one) are scored as Kind.SPEAR with their own real min/max
+     * reach instead of the flat DEFAULT_MELEE_RANGE every other melee
+     * weapon uses -- confirmed via decompiled AttackRange/Items source
+     * that a spear's minReach is nonzero (e.g. iron_spear: 2.0-4.5), so
+     * treating it as "just needs to be within 3 blocks" like a sword would
+     * both let the bot try to stab point-blank (where a real thrust misses
+     * per AttackRange.isInRange's own minReach check) and stop short of a
+     * spear's real, longer maxReach.
+     */
     private static void collectMeleeCandidates(final Inventory inventory, final List<WeaponCandidate> out) {
         for (int slot = 0; slot < Inventory.INVENTORY_SIZE; slot++) {
             ItemStack stack = inventory.getItem(slot);
@@ -406,8 +440,14 @@ public final class InventoryController {
                 continue;
             }
             double damage = attackDamageOf(stack);
-            if (damage > 0) {
-                out.add(new WeaponCandidate(Kind.MELEE, slot, damage, DEFAULT_MELEE_RANGE));
+            if (damage <= 0) {
+                continue;
+            }
+            AttackRange attackRange = stack.get(DataComponents.ATTACK_RANGE);
+            if (attackRange != null) {
+                out.add(new WeaponCandidate(Kind.SPEAR, slot, damage, attackRange.minReach(), attackRange.maxReach()));
+            } else {
+                out.add(new WeaponCandidate(Kind.MELEE, slot, damage, 0.0, DEFAULT_MELEE_RANGE));
             }
         }
     }
