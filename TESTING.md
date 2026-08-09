@@ -72,7 +72,7 @@ disposable test world.
 ## Headless launch
 
 Fabric Loom's `runClient` Gradle task (confirmed present: `./gradlew
-tasks --all` lists it) is the same launch this repo's own `AGENTS.md`
+tasks --all` lists it) is the same launch this repo's own `CLAUDE.md`
 build/deploy loop already uses manually. Two things needed on top of the
 plain task:
 

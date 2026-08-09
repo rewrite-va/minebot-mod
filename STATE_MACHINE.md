@@ -342,7 +342,7 @@ Suggested order for what comes next, unchanged from the original plan:
    axis from scratch.
 
 Each step should leave `!attack`/`!goto`/`!collect`/etc. working
-end-to-end via live testing (see `AGENTS.md`'s build/deploy/verify
+end-to-end via live testing (see `CLAUDE.md`'s build/deploy/verify
 routine) before moving to the next step -- do not let two control
 paradigms (old direct-tick-methods and new SM engine) silently diverge
 in behavior for whatever hasn't been migrated yet.
