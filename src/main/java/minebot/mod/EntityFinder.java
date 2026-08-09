@@ -114,12 +114,17 @@ public final class EntityFinder {
      * toward a target it could never actually reach in a straight line.
      * A blocked-but-closer hostile is simply skipped, not preferred over
      * a farther visible one -- "nearest AMONG VISIBLE", never "nearest
-     * overall, visibility be damned". Deliberately NOT applied to
-     * findNearestHostile's other two callers (PlayerIntentionKillNode's
-     * bare `!kill` fallback, TaskController's busy-threat interrupt) --
-     * per explicit direction, this is a DEFEND-specific fix, and an
-     * explicit `!kill` with no query is allowed to path toward a
-     * heard-but-not-yet-seen mob same as before.
+     * overall, visibility be damned".
+     *
+     * Also used by TaskController.busyThreat (per explicit direction: "I
+     * dont want to be stopped to sleep because of a monster behind a
+     * wall") -- a hostile the bot can't see is now also one it isn't
+     * "busy" defending against for queued-task purposes, matching what
+     * DEFEND's own combat targeting would actually react to. Still
+     * deliberately NOT applied to findNearestHostile's remaining caller
+     * (PlayerIntentionKillNode's bare `!kill` fallback) -- an explicit
+     * `!kill` with no query is allowed to path toward a heard-but-not-
+     * yet-seen mob same as before, unchanged.
      */
     public static Entity findNearestVisibleHostile(final ClientLevel level, final LocalPlayer player, final double radius) {
         Vec3 center = player.position();

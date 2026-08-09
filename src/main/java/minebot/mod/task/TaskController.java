@@ -147,22 +147,26 @@ public final class TaskController {
      *
      * Returns the real Entity (not just a boolean) so tick() can report
      * WHAT it found and HOW FAR away, not just "something" -- added after
-     * a live report of "it works but what threat? I see nothing": this
-     * uses EntityFinder.findNearestHostile, which (unlike
-     * findNearestVisibleHostile, DEFEND's own actual combat-targeting
-     * scan) has no line-of-sight check at all, and BUSY_THREAT_RADIUS is
-     * 32 blocks -- a hostile well behind a wall, underground, or just far
-     * across open terrain can hold the queue off with nothing visibly
-     * wrong on screen. That's intentional (per the same explicit
-     * direction: a real threat should still block a queued give/sleep
-     * even if the bot hasn't turned to look at it yet), but it needs to
-     * be a diagnosable "why" instead of a silent one.
+     * a live report of "it works but what threat? I see nothing".
+     *
+     * Uses EntityFinder.findNearestVisibleHostile (the same DEFEND-
+     * specific, line-of-sight-gated scan PlayerIntentionDefendNode's own
+     * combat targeting uses), NOT the plain findNearestHostile
+     * PlayerIntentionKillNode's bare `!kill` fallback still uses -- per
+     * explicit direction ("I dont want to be stopped to sleep because of
+     * a monster behind a wall"): the queue was holding off a !sleep/!give
+     * for a hostile DEFEND itself wouldn't even have engaged yet (plain
+     * findNearestHostile has no line-of-sight check at all), which made
+     * "busy" mean something stricter than what DEFEND's own fighting
+     * actually reacts to. Now the two agree: if DEFEND wouldn't lock onto
+     * it (behind a wall, underground, out of BUSY_THREAT_RADIUS), it
+     * doesn't block the queue either.
      */
     private Entity busyThreat(final TickContext ctx) {
         if (ctx.blackboard.get(playerIntentionStateMachine) != PlayerIntentionState.DEFEND) {
             return null;
         }
-        return EntityFinder.findNearestHostile(ctx.level, ctx.player.position(), BUSY_THREAT_RADIUS);
+        return EntityFinder.findNearestVisibleHostile(ctx.level, ctx.player, BUSY_THREAT_RADIUS);
     }
 
     /** "a zombie 18 blocks away" -- mob registry type name (matching EntityFinder.findNearestEntity's own type-string shape) plus real distance rounded to the nearest block, so the busy report/log line says something a player looking at their own surroundings can actually check against. */
