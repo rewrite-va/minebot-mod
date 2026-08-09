@@ -10,6 +10,7 @@ import net.minecraft.core.component.DataComponents;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.component.AttackRange;
 import net.minecraft.world.item.component.PiercingWeapon;
 
 /**
@@ -117,12 +118,34 @@ public final class HandsMeleeAttackNode implements StateNode<HandsState> {
         ItemStack heldItem = ctx.player.getMainHandItem();
         PiercingWeapon piercingWeapon = heldItem.get(DataComponents.PIERCING_WEAPON);
         if (piercingWeapon != null) {
+            // Debug logging added per explicit direction, to chase a live
+            // report of hitting a zombie from well past the spear's own
+            // survival maxReach (4.5, see FINDINGS.md's spear section) while
+            // standing still -- logs every real number this class and
+            // CombatEngagement's engagement decision are actually built on,
+            // at the exact moment a thrust is sent, so a live run can be
+            // compared against AttackRange.isInRange's own real formula
+            // (effectiveMaxRange + hitboxMargin) by hand rather than
+            // guessed at. distanceToTarget here is feet-to-feet
+            // (Entity.position(), the same value CombatEngagement's own
+            // distanceToTarget uses for engagement decisions) -- NOT the
+            // eye-to-eye distance AttackRange.isInRange itself measures
+            // (attacker.getEyePosition()), logged separately so the two
+            // can be told apart if they diverge.
+            AttackRange attackRange = ctx.player.getAttackRangeWith(heldItem);
+            double distanceToTarget = ctx.player.position().distanceTo(target.position());
+            double eyeDistanceToTarget = ctx.player.getEyePosition().distanceTo(target.position());
+            boolean isInRange = attackRange.isInRange(ctx.player, target.position());
+            MinebotMod.LOGGER.info(
+                "hands: spear thrust toward entity {} ({}) -- attackStrengthDelay={}, "
+                    + "distanceToTarget(feet)={}, distanceToTarget(eye)={}, "
+                    + "minReach={}, maxReach={}, hitboxMargin={}, isInRange={}",
+                target.getId(), target.getType(), ctx.player.getCurrentItemAttackStrengthDelay(),
+                distanceToTarget, eyeDistanceToTarget,
+                attackRange.minReach(), attackRange.maxReach(), attackRange.hitboxMargin(), isInRange
+            );
             Minecraft.getInstance().gameMode.piercingAttack(piercingWeapon);
             ctx.player.swing(InteractionHand.MAIN_HAND);
-            MinebotMod.LOGGER.info(
-                "hands: spear thrust toward entity {} ({}) -- attackStrengthDelay={}",
-                target.getId(), target.getType(), ctx.player.getCurrentItemAttackStrengthDelay()
-            );
             return;
         }
 

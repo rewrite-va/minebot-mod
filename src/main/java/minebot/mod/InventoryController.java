@@ -445,7 +445,15 @@ public final class InventoryController {
             }
             AttackRange attackRange = stack.get(DataComponents.ATTACK_RANGE);
             if (attackRange != null) {
-                out.add(new WeaponCandidate(Kind.SPEAR, slot, damage, attackRange.minReach(), attackRange.maxReach()));
+                out.add(
+                    new WeaponCandidate(
+                        Kind.SPEAR,
+                        slot,
+                        damage,
+                        attackRange.minReach(),
+                        attackRange.maxReach()
+                    )
+                );
             } else {
                 out.add(new WeaponCandidate(Kind.MELEE, slot, damage, 0.0, DEFAULT_MELEE_RANGE));
             }
