@@ -101,7 +101,10 @@ public final class HeadAimAtTargetNode implements StateNode<HeadState> {
         if (usingRanged) {
             double distanceHint = ctx.player.position().distanceTo(aimPoint);
             aimPoint = leadForVelocity(aimPoint, target, distanceHint);
-            aimPoint = arcLift(ctx, aimPoint);
+            // Disabled: arrows keep missing target -- see arcLift's own
+            // docstring for the drop-compensation formula being commented
+            // out for now while re-tuning live.
+            // aimPoint = arcLift(ctx, aimPoint);
         }
 
         double dx = aimPoint.x() - ctx.player.getX();
