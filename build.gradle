@@ -17,6 +17,55 @@ repositories {
     }
 }
 
+// Passes -Dminebot.bootstrapTestWorld=<name> through to the actual forked
+// client JVM when invoked as `./gradlew runClient -Pminebot.bootstrapTestWorld=<name>`
+// -- see TestWorldBootstrap's own docstring for what this triggers.
+// Gradle project properties (-P) are build-script-only; they don't reach
+// the forked game process on their own the way a real system property
+// does, confirmed live (a first attempt with just -P and no
+// loom.runConfigs wiring never reached TestWorldBootstrap's
+// System.getProperty check at all).
+// Boots straight into a world (skipping the main menu) when invoked as
+// `./gradlew runClient -Pminebot.quickPlayWorld=<name>` -- see TESTING.md's
+// own "Headless launch" section for why this + a real WSLg display (NOT
+// xvfb-run, see TESTING.md for why that was tried and rejected) is the
+// in-game test harness launch strategy.
+loom.runConfigs.client {
+    if (project.hasProperty("minebot.bootstrapTestWorld")) {
+        property("minebot.bootstrapTestWorld", project.property("minebot.bootstrapTestWorld").toString())
+    }
+    if (project.hasProperty("minebot.quickPlayWorld")) {
+        programArgs("--quickPlaySingleplayer", project.property("minebot.quickPlayWorld").toString())
+    }
+    // Overrides ControlClient's own hardcoded default port -- see
+    // MinebotMod.onInitializeClient's own comment. Needed so the pytest
+    // integration driver (minebot repo's tests/integration/) can run its
+    // own disposable ModBridge without colliding with the always-running
+    // dev backend's control channel on the default port.
+    if (project.hasProperty("minebot.controlPort")) {
+        property("minebot.controlPort", project.property("minebot.controlPort").toString())
+    }
+    // This machine has both an integrated AMD GPU and a discrete NVIDIA
+    // RTX 4090 (confirmed via `nvidia-smi`, real, visible from WSL2 --
+    // `/dev/dxg` present). WSLg's Mesa D3D12 Gallium driver defaulted to
+    // the AMD adapter, which was unstable under real gameplay load --
+    // confirmed live, repeatedly: every launch on the default adapter
+    // crashed 50-60s after successfully logging into the world, with
+    // three DIFFERENT crash signatures across attempts (GL_OUT_OF_MEMORY
+    // in glBufferStorage, a real GpuOutOfMemoryException during texture
+    // upload, and a native SIGSEGV inside Mesa's own software rasterizer
+    // swrast_dri.so) -- all inside vanilla/Mesa's own code, never this
+    // mod's, and all with the same ~1-minute-after-login timing
+    // regardless of which specific crash. Forcing the actual NVIDIA
+    // adapter via MESA_D3D12_DEFAULT_ADAPTER_NAME fixed it outright: the
+    // very next launch ran the full length of a 180s test window with no
+    // crash, no error, real chunk/UBO rendering happening the whole time.
+    // Set unconditionally (not just for test launches) since there's no
+    // known downside to targeting the real GPU for a normal dev
+    // `runClient` either.
+    environmentVariable("MESA_D3D12_DEFAULT_ADAPTER_NAME", "NVIDIA")
+}
+
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
 

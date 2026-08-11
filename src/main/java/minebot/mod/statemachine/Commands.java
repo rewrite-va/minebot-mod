@@ -15,4 +15,15 @@ public final class Commands {
         }
         return false;
     }
+
+    /** Like has(), but returns the matching Command itself (the most recent one this tick, if somehow more than one arrived) -- needed by one-shot commands that carry data an edge/node has to read, not just react to the presence of (e.g. Goto's own x/y/z), the same way Pickup/Stop only ever needed has()'s plain boolean. */
+    public static <T extends Command> T find(final List<Command> commands, final Class<T> type) {
+        T found = null;
+        for (Command command : commands) {
+            if (type.isInstance(command)) {
+                found = type.cast(command);
+            }
+        }
+        return found;
+    }
 }

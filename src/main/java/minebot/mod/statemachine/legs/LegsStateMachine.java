@@ -136,13 +136,15 @@ public final class LegsStateMachine {
     public static StateMachine<LegsState> create(final LegsNavigateNode navigateNode) {
         LegsGoToDeathPositionNode goToDeathPositionNode = new LegsGoToDeathPositionNode();
         LegsPickupItemsNode pickupItemsNode = new LegsPickupItemsNode();
+        LegsGotoNode gotoNode = new LegsGotoNode();
 
         Map<LegsState, StateNode<LegsState>> nodes = Map.of(
             LegsState.IDLE, new LegsIdleNode(),
             LegsState.NAVIGATE, navigateNode,
             LegsState.FLEE, new LegsFleeNode(),
             LegsState.GO_TO_DEATH_POSITION, goToDeathPositionNode,
-            LegsState.PICKUP_ITEMS, pickupItemsNode
+            LegsState.PICKUP_ITEMS, pickupItemsNode,
+            LegsState.GOTO, gotoNode
         );
 
         Predicate<TickContext> shouldRecover = ctx -> ctx.blackboard.get(DeathWatcher.DEATH_POSITION) != null;
@@ -150,6 +152,7 @@ public final class LegsStateMachine {
             ctx.blackboard.get(NavIntent.NAV_TARGET) != null && !Boolean.TRUE.equals(ctx.blackboard.get(NavIntent.NAV_ARRIVED));
         Predicate<TickContext> shouldFlee = ctx -> HandsEatNode.lowHealth(ctx) && InventoryController.hasFood(ctx.player);
         Predicate<TickContext> isPickupCommand = ctx -> Commands.has(ctx.commands, Command.Pickup.class);
+        Predicate<TickContext> isGotoCommand = ctx -> Commands.has(ctx.commands, Command.Goto.class);
         // FIGHT_JUST_ENDED itself is a real edge (fighting last tick, not
         // fighting this tick) computed centrally by CombatEngagement.
         // tickEdgeDetection -- see its own docstring for why that can't
@@ -174,6 +177,7 @@ public final class LegsStateMachine {
             new Edge<>(LegsState.IDLE, LegsState.GO_TO_DEATH_POSITION, shouldRecover),
             new Edge<>(LegsState.NAVIGATE, LegsState.GO_TO_DEATH_POSITION, shouldRecover),
             new Edge<>(LegsState.FLEE, LegsState.GO_TO_DEATH_POSITION, shouldRecover),
+            new Edge<>(LegsState.GOTO, LegsState.GO_TO_DEATH_POSITION, shouldRecover),
             new Edge<>(LegsState.GO_TO_DEATH_POSITION, LegsState.PICKUP_ITEMS, ctx -> goToDeathPositionNode.isFinished()),
             new Edge<>(LegsState.PICKUP_ITEMS, LegsState.FLEE, ctx -> pickupItemsNode.isFinished() && shouldFlee.test(ctx)),
             new Edge<>(LegsState.PICKUP_ITEMS, LegsState.NAVIGATE, ctx -> pickupItemsNode.isFinished() && !shouldFlee.test(ctx) && shouldNavigate.test(ctx)),
@@ -190,6 +194,15 @@ public final class LegsStateMachine {
             // FLEE.
             new Edge<>(LegsState.IDLE, LegsState.PICKUP_ITEMS, isPickupCommand),
             new Edge<>(LegsState.NAVIGATE, LegsState.PICKUP_ITEMS, isPickupCommand),
+
+            // !goto -- same ranking as !pickup above (below recovery/
+            // flee, above the plain navigate/idle fallback, not reachable
+            // from FLEE) -- see LegsState/Command.Goto's own docstrings.
+            new Edge<>(LegsState.IDLE, LegsState.GOTO, isGotoCommand),
+            new Edge<>(LegsState.NAVIGATE, LegsState.GOTO, isGotoCommand),
+            new Edge<>(LegsState.GOTO, LegsState.FLEE, ctx -> gotoNode.isFinished() && shouldFlee.test(ctx)),
+            new Edge<>(LegsState.GOTO, LegsState.NAVIGATE, ctx -> gotoNode.isFinished() && !shouldFlee.test(ctx) && shouldNavigate.test(ctx)),
+            new Edge<>(LegsState.GOTO, LegsState.IDLE, ctx -> gotoNode.isFinished() && !shouldFlee.test(ctx) && !shouldNavigate.test(ctx)),
 
             // Post-fight pickup -- see this class's own docstring for why
             // this is an edge-trigger (FightJustEnded), ranked alongside

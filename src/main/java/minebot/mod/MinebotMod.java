@@ -28,6 +28,7 @@ import minebot.mod.statemachine.legs.LegsNavigateNode;
 import minebot.mod.statemachine.legs.LegsState;
 import minebot.mod.statemachine.legs.LegsStateMachine;
 import minebot.mod.task.TaskController;
+import minebot.mod.testsupport.TestWorldBootstrap;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageTypes;
 import net.minecraft.world.entity.Entity;
@@ -66,6 +67,18 @@ import java.util.Set;
  */
 public final class MinebotMod implements ClientModInitializer {
     public static final Logger LOGGER = LoggerFactory.getLogger("minebot-mod");
+
+    // Set at the end of onInitializeClient, once this instance actually
+    // exists -- needed so ItemBreakMixin (which has no other way to reach
+    // a live MinebotMod instance; mixins target vanilla classes, not this
+    // one) can call broadcastItemBrokenEvent. Fabric only ever constructs
+    // one MinebotMod per client run, same one-instance assumption
+    // ClientModInitializer entry points already rely on.
+    private static MinebotMod instance;
+
+    public static MinebotMod getInstance() {
+        return instance;
+    }
 
     /**
      * A player's exact position/orientation -- used to decide whether
@@ -149,7 +162,17 @@ public final class MinebotMod implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        controlClient = new ControlClient("localhost", ControlClient.DEFAULT_PORT, this::handleMessage, this::onControlChannelConnected);
+        instance = this;
+        TestWorldBootstrap.registerIfRequested();
+        // Port overridable via -Dminebot.controlPort=<port> -- needed by
+        // the pytest integration driver (see minebot repo's
+        // tests/integration/), which launches its own disposable client
+        // and must not fight the always-running dev backend for
+        // localhost:47893. Defaults to DEFAULT_PORT so normal play (and
+        // every existing manual ./gradlew runClient invocation) is
+        // completely unaffected -- this is purely additive.
+        int controlPort = Integer.getInteger("minebot.controlPort", ControlClient.DEFAULT_PORT);
+        controlClient = new ControlClient("localhost", controlPort, this::handleMessage, this::onControlChannelConnected);
         controlClient.start();
         new StatusHud(controlClient, List.of(playerIntentionStateMachine, legsStateMachine, headStateMachine, handsStateMachine), blackboard, taskController).register();
         new PathVisualizer(legsPathTracker).register();
@@ -336,15 +359,15 @@ public final class MinebotMod implements ClientModInitializer {
 
     /**
      * Deliberately stripped down to only "follow"/"stop"/"kill"/"defend"/
-     * "pickup"/"give"/"chat" -- see STATE_MACHINE.md and the conversation
-     * that produced this: every other command (goto/dig_down/collect/
-     * move_to_hotbar/equip/drop/find/find_chest/query/debug_swap_test)
-     * was removed along with the ControlState.Mode-driven machinery and
-     * standalone classes that only existed to support them, rather than
-     * carrying old, not-yet-migrated behavior alongside the new peer
-     * state-machine architecture. Each command gets reintroduced, one at
-     * a time, once it's genuinely backed by a real SM node or Task (or,
-     * for "chat", confirmed to genuinely need none at all) -- see git
+     * "pickup"/"give"/"chat"/"sleep"/"goto" -- see STATE_MACHINE.md and
+     * the conversation that produced this: every other command (dig_down/
+     * collect/move_to_hotbar/equip/drop/find/find_chest/query/
+     * debug_swap_test) was removed along with the ControlState.Mode-driven
+     * machinery and standalone classes that only existed to support them,
+     * rather than carrying old, not-yet-migrated behavior alongside the
+     * new peer state-machine architecture. Each command gets reintroduced,
+     * one at a time, once it's genuinely backed by a real SM node or Task
+     * (or, for "chat", confirmed to genuinely need none at all) -- see git
      * history for the removed implementations if reintroducing one.
      * "kill" was the first one reintroduced this way (PlayerIntention:
      * KILL -- originally named COMBAT, renamed once "defend" needed the
@@ -354,13 +377,15 @@ public final class MinebotMod implements ClientModInitializer {
      * reason "give"/"sleep" are Tasks rather than peer-SM axis values;
      * "defend" is PlayerIntention:DEFEND + the same Hands:MELEE_ATTACK/
      * DRAW_BOW + Head:AIM_AT_TARGET; "pickup" is Legs:PICKUP_ITEMS (see
-     * Command.Pickup's own docstring); "give"/"sleep"/"kill" are
-     * TaskController's own GiveTask/SleepTask/KillTask (see
-     * TaskController's own docstring for why those are queued Tasks
-     * rather than another peer-SM axis); "chat" is the one exception with
-     * no SM node/Task behind it at all -- a real vanilla chat send is an
-     * instant, stateless side effect (see its own case's docstring below
-     * for why), never displaced by re-entering it.
+     * Command.Pickup's own docstring); "goto" is Legs:GOTO (see
+     * Command.Goto/LegsGotoNode's own docstrings -- built for the in-game
+     * test harness's own first "bot walks A to B" slice, see TESTING.md);
+     * "give"/"sleep"/"kill" are TaskController's own GiveTask/SleepTask/
+     * KillTask (see TaskController's own docstring for why those are
+     * queued Tasks rather than another peer-SM axis); "chat" is the one
+     * exception with no SM node/Task behind it at all -- a real vanilla
+     * chat send is an instant, stateless side effect (see its own case's
+     * docstring below for why), never displaced by re-entering it.
      *
      * Also updates playerIntention here, alongside publishing the
      * Command itself, for "follow"/"stop"/"defend" -- this is the one
@@ -444,6 +469,16 @@ public final class MinebotMod implements ClientModInitializer {
                 int quantity = json.has("quantity") && !json.get("quantity").isJsonNull() ? json.get("quantity").getAsInt() : 0;
                 commandBus.publish(new Command.Give(recipientEntityId, item, quantity));
             }
+            case "goto" -> {
+                // "x"/"y"/"z" are required world coordinates -- see
+                // Command.Goto/LegsGotoNode's own docstrings. Deliberately
+                // does NOT touch playerIntention -- like pickup/kill, this
+                // is a one-shot Legs-only reaction, not a standing goal.
+                double x = json.get("x").getAsDouble();
+                double y = json.get("y").getAsDouble();
+                double z = json.get("z").getAsDouble();
+                commandBus.publish(new Command.Goto(x, y, z));
+            }
             case "sleep" -> {
                 // No data at all -- "nearest bed" is the only meaningful
                 // target (see Command.Sleep's own docstring). Deliberately
@@ -493,10 +528,41 @@ public final class MinebotMod implements ClientModInitializer {
         controlClient.sendEvent(event.toString());
     }
 
-    /** A genuine vanilla chat SEND, same mechanism/visibility as the "chat" dispatch case above (see its own docstring) -- pulled out into its own static method so TaskController's busyReporter can use it too via a plain method reference, without needing a real dependency on MinebotMod itself. Static (not instance) since it only ever needs Minecraft.getInstance(), the same reasoning EntityFinder/WaypointClassifier's own static-utility shape already established for stateless real-game-state reads. Null-safe the same way the original inline call was -- player can be null for the handful of ticks before the world/player actually loads. */
+    /**
+     * A genuine vanilla chat SEND, same mechanism/visibility as the "chat"
+     * dispatch case above (see its own docstring) -- pulled out into its
+     * own static method so TaskController's busyReporter can use it too
+     * via a plain method reference, without needing a real dependency on
+     * MinebotMod itself. Static (not instance) since it only ever needs
+     * Minecraft.getInstance(), the same reasoning EntityFinder/
+     * WaypointClassifier's own static-utility shape already established
+     * for stateless real-game-state reads. Null-safe the same way the
+     * original inline call was -- player can be null for the handful of
+     * ticks before the world/player actually loads.
+     *
+     * Routes `/`-prefixed text through ClientPacketListener.sendCommand
+     * (stripping the leading slash) instead of sendChat -- confirmed via
+     * decompiled ChatScreen bytecode that this is exactly what vanilla's
+     * own chat input box does (checks for a leading '/', calls sendCommand
+     * with the slash stripped; sendChat otherwise), and confirmed live
+     * this mod was NOT doing that: an in-game-test's own `/tp @s 0 -60 0`
+     * sent via the "chat" wire command arrived at the server as a literal
+     * CHAT message ("<Player> /tp @s 0 -60 0" visible in vanilla's own
+     * chat log) rather than executing as a command at all -- the bot never
+     * actually moved, and the caller's own arrival-polling loop timed out
+     * with no error pointing at the real cause. Every existing caller of
+     * this method (the "chat" wire case, TaskController's busyReporter)
+     * already sends both plain chat AND real "/"-commands through the
+     * same path, so fixing it here fixes both, not just the new /tp use.
+     */
     static void sendChat(final String text) {
         Minecraft client = Minecraft.getInstance();
-        if (client.player != null) {
+        if (client.player == null) {
+            return;
+        }
+        if (text.startsWith("/")) {
+            client.player.connection.sendCommand(text.substring(1));
+        } else {
             client.player.connection.sendChat(text);
         }
     }
@@ -591,6 +657,21 @@ public final class MinebotMod implements ClientModInitializer {
     private void broadcastDeathEvent() {
         JsonObject event = new JsonObject();
         event.addProperty("type", "death");
+        controlClient.sendEvent(event.toString());
+    }
+
+    /**
+     * Fires exactly once per item destroyed by durability loss -- see
+     * ItemBreakMixin's own docstring for the vanilla hook this comes from.
+     * `item`/`slot` are handed straight from that hook rather than read
+     * back off the equipment slot, since the stack is already cleared by
+     * the time onEquippedItemBroken runs.
+     */
+    public void broadcastItemBrokenEvent(final net.minecraft.world.item.Item item, final net.minecraft.world.entity.EquipmentSlot slot) {
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "item_broken");
+        event.addProperty("item", net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(item).toString());
+        event.addProperty("slot", slot.getName());
         controlClient.sendEvent(event.toString());
     }
 

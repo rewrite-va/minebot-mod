@@ -52,11 +52,20 @@ package minebot.mod.statemachine.legs;
  * edges (shouldNavigate/shouldFlee) take back over exactly as if nothing
  * had interrupted them, since neither node ever touched PlayerIntention's
  * own state to begin with.
+ *
+ * GOTO handles !goto x y z -- a one-shot "walk to this fixed coordinate,
+ * then stop" command (see Command.Goto/LegsGotoNode's own docstrings),
+ * ranked the same as PICKUP_ITEMS: reachable directly from IDLE/NAVIGATE,
+ * below GO_TO_DEATH_POSITION/FLEE (an active recovery or a flee-from-
+ * danger shouldn't be preempted by a merely-voluntary goto) but above the
+ * ordinary NAVIGATE/IDLE fallback edges, and NOT reachable from FLEE for
+ * the same reason !pickup isn't (see LegsStateMachine's own docstring).
  */
 public enum LegsState {
     IDLE,
     NAVIGATE,
     FLEE,
     GO_TO_DEATH_POSITION,
-    PICKUP_ITEMS
+    PICKUP_ITEMS,
+    GOTO
 }

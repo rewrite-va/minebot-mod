@@ -4,7 +4,8 @@
   "package": "minebot.mod.mixin",
   "compatibilityLevel": "JAVA_21",
   "client": [
-    "AbstractArrowAccessor"
+    "AbstractArrowAccessor",
+    "ItemBreakMixin"
   ],
   "injectors": {
     "defaultRequire": 1

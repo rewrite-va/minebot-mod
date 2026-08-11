@@ -44,4 +44,8 @@ public sealed interface Command {
     /** !sleep -- walk to the nearest bed and sleep in it. Read by TaskController.tick() to enqueue a fresh SleepTask, the same queued-Task shape Give uses (not a peer StateMachine concern at all -- see task/SleepTask's own docstring for why this isn't a PlayerIntentionState the way Kill is). Deliberately carries no data, there's nothing to parameterize: "nearest bed" is the only meaningful target, resolved entirely client-side via BlockFinder since Python has no block-scanning of its own. */
     record Sleep() implements Command {
     }
+
+    /** !goto x y z -- walk to a fixed world coordinate, once, then stop. A Legs-only one-shot concern, same shape as Pickup (see LegsGotoNode's own docstring) rather than a standing PlayerIntention value -- "walk here" has no ongoing goal to resume after an interruption the way Follow/Defend do. First reintroduction of the "goto" command stripped out during the peer-state-machine rewrite (see MinebotMod.dispatchMessage's own docstring), now genuinely backed by a real SM node instead of the old ControlState.Mode-driven pathfinding. */
+    record Goto(double x, double y, double z) implements Command {
+    }
 }
