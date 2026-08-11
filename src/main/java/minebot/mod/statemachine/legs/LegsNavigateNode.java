@@ -2,6 +2,7 @@ package minebot.mod.statemachine.legs;
 
 import minebot.mod.MinebotMod;
 import minebot.mod.MovementIntent;
+import minebot.mod.pathfinding.JumpPhysics;
 import minebot.mod.pathfinding.Move;
 import minebot.mod.pathfinding.WaypointClassifier;
 import minebot.mod.statemachine.BlackboardKey;
@@ -180,28 +181,45 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
     // completed cleanly, and that leftover state fed directly into
     // whether the NEXT run's own tight-runway jump could build enough
     // runupTicks before reaching the platform edge.
+    // The REQUIRED tick count is no longer a fixed constant here -- see
+    // JumpPhysics.planRunup, called per-waypoint from walkTowardNavTarget
+    // below, which derives it from the real horizontal distance to the
+    // current jump waypoint using vanilla's actual per-tick physics model
+    // (a fixed constant tuned against one jump scenario was confirmed
+    // live to overshoot shorter jumps badly).
     static final BlackboardKey<Integer> SPRINT_RUNUP_TICKS = new BlackboardKey<>("SPRINT_RUNUP_TICKS");
-    // A real vanilla sprint ramps up from a standing start over roughly
-    // half a second (LivingEntity's own gradual speed-attribute
-    // acceleration, not instant), so a handful of ticks of forward
-    // pressure should already be well clear of that -- not tuned against
-    // a precise measured vanilla constant, just picked comfortably above
-    // the ramp-up window.
-    //
-    // Lowered from 8 to 5, confirmed live via a direct tick-by-tick DEBUG
-    // trace (goto_jump_2's own scenario -- a 1-block-deep platform before
-    // a 2-block gap+climb jump): the bot only ever accumulates ~5-6 real
-    // runup ticks before walking off the platform's own edge, so 8 was
-    // simply unreachable on a platform this size -- it walked off the
-    // edge 1-2 ticks short of the threshold on EVERY attempt, never
-    // firing the jump at all (confirmed by the human operator manually
-    // clearing this exact gap from the same ~1 block of runway with no
-    // running). 5 still leaves a real, if shorter, sprint-ramp-up window
-    // above LivingEntity's own gradual acceleration, while actually
-    // fitting within a tight platform's real available runway. Revisit
-    // if a future scenario needs more runway than this allows and 5
-    // turns out to be too short for a DIFFERENT jump.
-    private static final int SPRINT_RUNUP_TICKS_REQUIRED = 5;
+
+    /**
+     * The JumpPhysics.Plan computed once, the tick run-up first starts
+     * building (SPRINT_RUNUP_TICKS 0 -> 1) toward a requiresJump
+     * waypoint -- NOT recomputed every tick from the live, shrinking
+     * distance to that waypoint. Confirmed live as a real bug in an
+     * earlier version of this fix: calling JumpPhysics.planRunup fresh
+     * every tick off horizontalDistance (which is measured from the
+     * bot's CURRENT position, shrinking as it walks toward the edge)
+     * fed the planner a moving target -- by the time the bot actually
+     * reached the takeoff edge, the "required" runupTicks had already
+     * dropped out from under hasRunup's own threshold check (or worse,
+     * kept recalculating airborne, well past the point run-up even
+     * matters), so the jump either fired with the wrong plan or never
+     * satisfied hasRunup at all before walking off the edge ungated.
+     * The distance that actually determines how far a jump travels is
+     * fixed at the moment of liftoff, so the plan has to be fixed then
+     * too -- frozen here the instant run-up starts (the bot is still
+     * standing at essentially the same spot a few ticks later when it
+     * actually leaves the ground, so using run-up-start distance as a
+     * proxy for takeoff distance is accurate enough in practice).
+     */
+    static final BlackboardKey<JumpPhysics.Plan> JUMP_PLAN = new BlackboardKey<>("JUMP_PLAN");
+
+    // How close (real horizontal distance, not PathTracker.nextWaypoint's
+    // own coarser floor()-based block match) counts as "already at this
+    // jump waypoint" -- see requiresJumpSafeToFire's own docstring for
+    // the double-jump bug this suppresses. Matches LegsGotoNode's own
+    // ARRIVAL_DISTANCE (0.5) -- both answer the same underlying question
+    // ("close enough that this counts as arrived"), just for a
+    // pathfinding waypoint instead of the final !goto target.
+    private static final double ARRIVAL_DISTANCE_FOR_JUMP_SUPPRESSION = 0.5;
 
     @Override
     public void onEnter(final TickContext ctx, final LegsState previousState) {
@@ -272,7 +290,7 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         double targetY = targetPosition.y();
         double targetZ = targetPosition.z();
 
-        ctx.pathTracker.maybeReplan(ctx.level, ctx.player, selfX, selfY, selfZ, targetX, targetY, targetZ, stopDistanceValue, avoidLiquid);
+        ctx.pathTracker.maybeReplan(ctx.level, ctx.player, selfX, selfY, selfZ, targetX, targetY, targetZ, stopDistanceValue, avoidLiquid, ctx.player.onGround());
 
         if (ctx.pathTracker.lastSearchFoundNoPath()) {
             // A real, completed search found no route at all -- stop
@@ -410,69 +428,167 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         // nothing left to break.
         boolean stillNeedsDigging = waypoint != null && !waypoint.toBreak.isEmpty()
                 && waypoint.toBreak.stream().anyMatch(pos -> !ctx.level.getBlockState(pos).isAir());
-        // Ticks spent holding forward+sprint toward this waypoint, used to
-        // gate a requiresJump move's jump -- see SPRINT_RUNUP_TICKS' own
+        // Ticks spent holding forward toward this waypoint, used to gate a
+        // requiresJump move's jump -- see SPRINT_RUNUP_TICKS' own
         // docstring for the live "fires the jump the instant walking
         // starts, falls short of a real running jump every time" bug this
-        // exists to fix. Deliberately NOT also gated on real measured
-        // horizontal speed (an earlier version of this fix required
-        // getDeltaMovement() to reach a minimum threshold too) -- reported
-        // live: the takeoff stance for the exact jump this was built for
-        // has effectively zero run-up room before the wall (real speed
-        // measured ~0 the entire approach, confirmed via this same
-        // diagnostic), so a real-speed requirement can never be satisfied
-        // there and permanently blocked the jump from ever firing at all
-        // -- worse than the original bug (that one at least attempted the
-        // jump). Per explicit direction (a live by-hand test confirming
-        // this jump IS makeable, but only while sprinting): what actually
-        // matters is holding the sprint key for real vanilla's own
-        // gradual sprint-speed ramp-up to take effect, not distance
-        // physically covered beforehand -- ticks-held is a correct proxy
-        // for that on its own.
+        // originally existed to fix.
+        //
+        // The REQUIRED tick count (and whether to sprint at all) is no
+        // longer a single fixed constant -- see JumpPhysics' own
+        // docstring for the full derivation from real decompiled vanilla
+        // physics. A fixed SPRINT_RUNUP_TICKS_REQUIRED=5-and-always-sprint
+        // was tuned against exactly one jump (goto_jump_2's own 2-block
+        // gap) and, confirmed live, systematically OVERSHOOTS shorter
+        // jumps: sprinting compounds horizontal speed too fast for a
+        // short runway, so the bot lands well past a close target and
+        // falls off the far side instead of landing on it.
+        // JumpPhysics.planRunup computes, from the REAL horizontal
+        // distance to this specific waypoint, the smallest run-up (and
+        // whether it needs sprinting at all) that reaches -- but does not
+        // overshoot past -- the target, using the same tick-by-tick
+        // friction/accel model real vanilla movement uses.
         boolean buildingRunup = walking && facingWaypoint && intent.forward && ctx.player.onGround();
-        int runupTicks = buildingRunup
-            ? (ctx.blackboard.get(SPRINT_RUNUP_TICKS) == null ? 0 : ctx.blackboard.get(SPRINT_RUNUP_TICKS)) + 1
-            : 0;
+        int previousRunupTicks = ctx.blackboard.get(SPRINT_RUNUP_TICKS) == null ? 0 : ctx.blackboard.get(SPRINT_RUNUP_TICKS);
+        int runupTicks = buildingRunup ? previousRunupTicks + 1 : 0;
         ctx.blackboard.put(SPRINT_RUNUP_TICKS, runupTicks);
-        boolean hasRunup = runupTicks >= SPRINT_RUNUP_TICKS_REQUIRED;
-        boolean requiresJumpSafeToFire = (!waypointRequiresJump || (facingWaypoint && hasRunup)) && !stillNeedsDigging;
-        boolean wantsToJump = walking && (dy > 0.1 || waypointRequiresJump) && !landingOnFarmland && requiresJumpSafeToFire;
+        JumpPhysics.Plan jumpPlan = null;
+        if (waypointRequiresJump) {
+            if (runupTicks == 1) {
+                // Run-up just started this tick -- freeze the plan now,
+                // against the distance as measured at run-up's own start
+                // (see JUMP_PLAN's own docstring for why this must NOT be
+                // recomputed every tick off the live, shrinking distance).
+                jumpPlan = JumpPhysics.planRunup(horizontalDistance);
+                ctx.blackboard.put(JUMP_PLAN, jumpPlan);
+            } else if (runupTicks > 1) {
+                jumpPlan = ctx.blackboard.get(JUMP_PLAN);
+            } else {
+                // Not currently building run-up (walked off without ever
+                // reaching one -- e.g. mid-air after a failed attempt) --
+                // fall back to a fresh plan against whatever distance
+                // remains right now, since there's no frozen run-up-start
+                // plan to reuse.
+                jumpPlan = JumpPhysics.planRunup(horizontalDistance);
+            }
+        }
+        // A short platform can run out of real ground before the frozen
+        // plan's own runupTicks is ever reached -- confirmed live: this
+        // exact jump (a 2-block gap+climb move off a 1-block-deep
+        // platform) only ever has ~4-5 real ticks of solid ground before
+        // the edge, no matter how the plan's own tick count is tuned,
+        // since the platform's physical depth is what actually bounds
+        // run-up, not any constant in this code. Check one block AHEAD
+        // (in the walking direction) for solid ground under it; once
+        // that's gone, continuing to wait for the frozen plan's own
+        // runupTicks would just walk the bot straight off the edge with
+        // no jump input at all (the original "does not jump at all" bug
+        // this whole investigation started from). Firing on this, the
+        // LAST tick with solid ground still ahead, uses whatever run-up
+        // was actually built -- not necessarily what the frozen plan
+        // wanted, but strictly better than the alternative of walking off
+        // ungated.
+        boolean groundAheadOfNextStep = waypointRequiresJump && hasGroundOneBlockAhead(ctx);
+        boolean atLastSafeTick = waypointRequiresJump && buildingRunup && !groundAheadOfNextStep;
+        boolean hasRunup = jumpPlan == null || runupTicks >= jumpPlan.runupTicks() || atLastSafeTick;
+        // Never fire a fresh jump when the bot has effectively already
+        // landed on/at the current waypoint -- confirmed live as a real
+        // double-jump bug: PathTracker.nextWaypoint's own "reached" check
+        // is a Math.floor(selfX/selfZ) == waypoint.x/z exact-block match
+        // (see its own docstring), which can miss a landing that's real-
+        // world CLOSE to the waypoint but technically straddles the block
+        // boundary (observed live: landed at z=-0.11, floor(-0.11)=-1,
+        // the waypoint's own z=0 -- one hundredth of a block short of
+        // matching, on the wrong side of an integer boundary). The
+        // waypoint then isn't popped, requiresJump is still true on it,
+        // and the very next tick (the SAME tick landing completes)
+        // wantsToJump fired again -- launching a second, pointless jump
+        // that overshot the bot even further from a target it had
+        // already essentially reached. horizontalDistance here is real
+        // (not floor-based) distance to the waypoint's own aim point, so
+        // this catches exactly the case nextWaypoint's own coarser check
+        // misses.
+        boolean effectivelyAtWaypoint = waypointRequiresJump && horizontalDistance <= ARRIVAL_DISTANCE_FOR_JUMP_SUPPRESSION;
+        boolean requiresJumpSafeToFire = (!waypointRequiresJump || (facingWaypoint && hasRunup)) && !stillNeedsDigging
+            && !effectivelyAtWaypoint;
+        // Only ever press jump while actually ON GROUND -- confirmed
+        // live as a real bug (the bot spontaneously entered creative
+        // FLIGHT mid-test): wantsToJump could stay true for several
+        // consecutive ticks while already airborne (waypointRequiresJump
+        // doesn't clear until the waypoint itself advances, well after
+        // liftoff), so intent.jump kept getting asserted every one of
+        // those ticks. Vanilla's own double-tap-space-toggles-flying
+        // detection reads consecutive jump-key-down edges, and repeatedly
+        // holding/reasserting jump while airborne (then again right as
+        // the bot touches back down) reads as exactly that double-tap,
+        // toggling creative flight on entirely by accident. A real jump
+        // is a single discrete key-down on the ground, held or not; there
+        // is nothing for a jump input to do once already airborne.
+        boolean wantsToJump = walking && ctx.player.onGround() && (dy > 0.1 || waypointRequiresJump) && !landingOnFarmland && requiresJumpSafeToFire;
         if (wantsToJump) {
             intent.jump = true;
+        }
+        // Sprint only when the computed plan actually calls for it (a
+        // requiresJump move close enough to reach on a walking jump) --
+        // NOT unconditionally whenever walking, which is what caused the
+        // overshoot in the first place. Plain step-ups (requiresJump
+        // false) and FLEE's alwaysSprint=true path are unaffected.
+        if (jumpPlan != null && jumpPlan.sprint() && walking) {
             intent.sprint = true;
         }
         if (walking && alwaysSprint) {
             intent.sprint = true;
         }
-        // TEMPORARY DEBUG: sprint held for the entire walk, not just once
-        // a jump is about to fire -- per explicit direction, to check
-        // whether SPRINT_RUNUP_TICKS' own tick-counting is actually
-        // coinciding with a REAL held sprint the whole run-up (previously
-        // intent.sprint only went true on the same tick wantsToJump did,
-        // so the counter could reach SPRINT_RUNUP_TICKS_REQUIRED while the
-        // bot was still just walking, never actually sprinting, during
-        // the run-up itself). Remove once confirmed whether this is what
-        // was missing.
-        if (walking) {
-            intent.sprint = true;
-        }
 
-        // Temporary diagnostic, extended to cover the new run-up gating --
-        // still verifying the SPRINT_RUNUP_TICKS fix live against the
-        // exact jump it was built for. Throttled to every 10 ticks (0.5s).
-        // Intended to be removed once confirmed working; not gated behind
-        // isDebugEnabled() since this client's log4j config filters debug
-        // output entirely (see BlockBreaker's own per-tick diagnostic for
-        // the same reasoning).
         if (walking && waypoint != null && ctx.player.tickCount % 10 == 0) {
             MinebotMod.LOGGER.info(
-                "navigate[diag]: self=({}, {}, {}) waypoint=({}, {}, {}) requiresJump={} dy={} relativeYawIntent=[fwd={} back={} left={} right={}] facingWaypoint={} runupTicks={} hasRunup={} jump={} onGround={}",
+                "navigate[diag]: self=({}, {}, {}) waypoint=({}, {}, {}) requiresJump={} dy={} relativeYawIntent=[fwd={} back={} left={} right={}] facingWaypoint={} runupTicks={} hasRunup={} jumpPlan={} jump={} onGround={}",
                 selfX, selfY, selfZ, waypoint.x, waypoint.y, waypoint.z, waypointRequiresJump, dy,
                 intent.forward, intent.backward, intent.left, intent.right, facingWaypoint,
-                runupTicks, hasRunup, wantsToJump, ctx.player.onGround()
+                runupTicks, hasRunup, jumpPlan, wantsToJump, ctx.player.onGround()
             );
         }
         ctx.input.setIntent(intent);
+    }
+
+    /**
+     * True if the block one tile further in the direction of `dx, dz`
+     * (the walk direction toward the current aim point -- see this
+     * method's own call site) has solid ground under it -- used to detect
+     * "one more step and there's nothing left to stand on" while building
+     * run-up, so a short platform can force the jump to fire on its own
+     * last safe tick instead of letting the bot walk straight off the
+     * edge with no jump input at all (see the SPRINT_RUNUP_TICKS-adjacent
+     * comment at this method's own call site for the live bug this
+     * fixes). Checks the block at foot level one tile ahead, not the
+     * block directly below the player's CURRENT position -- the player
+     * is already standing on solid ground by definition while still
+     * onGround(), so the question that actually matters is whether the
+     * NEXT tile has any.
+     */
+    private static boolean hasGroundOneBlockAhead(final TickContext ctx) {
+        NavIntent.Target target = ctx.blackboard.get(NavIntent.NAV_TARGET);
+        if (target == null) {
+            return true;
+        }
+        Move waypoint = null;
+        for (Move m : ctx.pathTracker.waypoints()) {
+            waypoint = m;
+            break;
+        }
+        double aimX = waypoint != null ? waypoint.x + 0.5 : target.position().x();
+        double aimZ = waypoint != null ? waypoint.z + 0.5 : target.position().z();
+        double dx = aimX - ctx.player.getX();
+        double dz = aimZ - ctx.player.getZ();
+        double length = Math.sqrt(dx * dx + dz * dz);
+        if (length < 1.0E-6) {
+            return true;
+        }
+        int aheadX = (int) Math.floor(ctx.player.getX() + dx / length);
+        int aheadZ = (int) Math.floor(ctx.player.getZ() + dz / length);
+        int footY = (int) Math.floor(ctx.player.getY());
+        BlockPos below = new BlockPos(aheadX, footY - 1, aheadZ);
+        return !ctx.level.getBlockState(below).isAir();
     }
 
     /**

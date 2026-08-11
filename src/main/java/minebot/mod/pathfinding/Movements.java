@@ -122,7 +122,12 @@ public final class Movements {
     // step both cost the same) gave A* no reason to prefer the easier
     // one, even though real jump execution has far less margin for error
     // the closer it gets to the physical cap.
-    private static final double MAX_STEP_HEIGHT = 1.2;
+    // Package-visible (not private) -- PathTracker also needs this as the
+    // cap on vertical self-drift tolerance before forcing a replan (see
+    // its own SELF_DRIFT_REPLAN_DISTANCE_VERTICAL docstring): a jump-back-
+    // up waypoint taller than this is physically impossible the same way
+    // it's impossible to ever offer as a move here.
+    static final double MAX_STEP_HEIGHT = 1.2;
     private static final double JUMP_HEIGHT_COMFORTABLE = 1.0; // a plain 1-block step-up -- no penalty up to here
     private static final double JUMP_HEIGHT_PENALTY_MAX = 6.0; // cost added at a jump right at MAX_STEP_HEIGHT itself
     private static final double DIG_COST = 1.0; // movements.js's default Movements#digCost

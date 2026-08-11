@@ -52,6 +52,18 @@ public final class LegsGotoNode implements StateNode<LegsState> {
     // it isn't exactly 0.0.
     private static final double ARRIVAL_DISTANCE = 0.5;
 
+    // How much residual horizontal speed (blocks/tick) is "stopped enough"
+    // to hand off to IDLE -- see isFinished's own arrival-check docstring
+    // for the real bug this guards against (a jump's leftover slide
+    // carrying the bot off a small landing platform the same tick GOTO
+    // exits). Picked well below ordinary walking speed (~0.1-0.13
+    // blocks/tick, see JumpPhysics' own docstring for the real vanilla
+    // constants) so this only holds for the couple of ticks real ground
+    // friction (0.6 * 0.91 per tick on a default block) takes to bleed
+    // off jump-landing momentum specifically, not for the bot's entire
+    // approach.
+    private static final double ARRIVAL_MAX_HORIZONTAL_SPEED = 0.02;
+
     private Vec3 target;
     private boolean finished;
 
@@ -97,7 +109,40 @@ public final class LegsGotoNode implements StateNode<LegsState> {
         ctx.blackboard.put(NavIntent.NAV_TARGET, new NavIntent.Target(target, ARRIVAL_DISTANCE));
         LegsNavigateNode.walkTowardNavTarget(ctx, false, false);
         double distance = ctx.player.position().distanceTo(target);
-        boolean withinRange = distance <= ARRIVAL_DISTANCE;
+        // Only count arrival while ON GROUND -- confirmed live as a real
+        // bug: a jump's own airborne arc can pass within ARRIVAL_DISTANCE
+        // of the target well before actually landing on it (e.g. flying
+        // directly over/through the target's own column mid-jump), which
+        // satisfied this check and exited GOTO back to IDLE while still
+        // mid-air. IDLE applies no more movement intent at all, so
+        // whatever momentum the bot had at that exact instant became the
+        // only thing determining where it actually landed -- observed
+        // live as a perpetual timeout loop: GOTO exited a bare ~1 second
+        // after entering (well before the jump's own arc had time to
+        // land), the bot fell uncontrolled the rest of the way down past
+        // the target platform, and the test's own separate arrival check
+        // (which DOES require being actually on the ground near the
+        // target, not just having passed near it in the air) never saw a
+        // real landing, timing out every single attempt.
+        //
+        // Also requires near-zero horizontal velocity -- confirmed live
+        // as a SECOND, distinct real bug once the onGround fix above was
+        // in place: the bot could correctly land ON GROUND, ON TARGET
+        // (onGround=true, distance well under ARRIVAL_DISTANCE), but
+        // still carrying real residual horizontal momentum from the jump
+        // that hadn't bled off via ground friction yet. GOTO exited to
+        // IDLE the very same tick, which applies NO movement intent at
+        // all -- with nothing left to counteract it, that one tick of
+        // leftover slide was enough to carry the bot straight off a small
+        // (1-block-deep) landing platform's own edge, falling all the way
+        // to bedrock. Waiting for horizontal speed to drop below
+        // ARRIVAL_MAX_HORIZONTAL_SPEED (vanilla ground friction bleeds
+        // this off within 1-2 ticks, an imperceptible extra delay) means
+        // control is only ever handed to IDLE once the bot has actually
+        // stopped, not merely arrived-but-still-sliding.
+        Vec3 horizontalVelocity = new Vec3(ctx.player.getDeltaMovement().x, 0.0, ctx.player.getDeltaMovement().z);
+        boolean withinRange = distance <= ARRIVAL_DISTANCE && ctx.player.onGround()
+            && horizontalVelocity.length() <= ARRIVAL_MAX_HORIZONTAL_SPEED;
         ctx.blackboard.put(NavIntent.NAV_ARRIVED, withinRange);
         // Give up (report finished) once pathfinding has genuinely
         // determined there's no route at all, not just "haven't arrived

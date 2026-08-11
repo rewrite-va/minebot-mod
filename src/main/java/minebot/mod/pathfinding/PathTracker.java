@@ -42,7 +42,28 @@ public final class PathTracker {
     // kept "detecting" a door on the other side of the map from its actual
     // (respawned) position forever, since only the target's movement was
     // ever checked.
-    private static final double SELF_DRIFT_REPLAN_DISTANCE = 4.0;
+    //
+    // Split into horizontal and vertical components (was a single 3D
+    // Euclidean distance) -- per explicit direction, a flat 4.0-block
+    // radius let a *vertical* drift of up to 4 blocks still read as "close
+    // enough, keep the existing plan," when a drop of even ~2-3 blocks
+    // already makes the very next planned waypoint (a jump BACK UP onto
+    // wherever the bot fell from) physically impossible: no real vanilla
+    // jump can climb that far in one bound (see Movements.MAX_STEP_HEIGHT,
+    // ~1.2 blocks -- movements.js's own hard reject cap for a single jump
+    // move, backed by real jumpFromGround physics). Confirmed live: the
+    // bot fell off a 2-block-gap jump's own landing platform, landed on
+    // the ground below, and then bounced in place forever re-attempting
+    // the exact same now-unreachable up-jump waypoint (0,-58,0) -- stuck
+    // oscillating between onGround=true/false at a fixed (x,z) since
+    // selfDrift's old 3D distance to that waypoint never exceeded 4.0,
+    // so maybeReplan kept reusing the stale plan and A* was never asked
+    // to look at the bot's real (fallen) position again. Horizontal drift
+    // keeps the original 4.0 -- lateral wandering off a walkable path is a
+    // different, much less physically constrained situation than falling
+    // below a jump's own reachable height.
+    private static final double SELF_DRIFT_REPLAN_DISTANCE_HORIZONTAL = 4.0;
+    private static final double SELF_DRIFT_REPLAN_DISTANCE_VERTICAL = Movements.MAX_STEP_HEIGHT;
 
     private final Deque<Move> currentPath = new ArrayDeque<>();
     private double[] pathComputedFor; // {x, y, z}, or null if no path has been computed yet
@@ -103,7 +124,7 @@ public final class PathTracker {
         final ClientLevel level, final LocalPlayer player,
         final double selfX, final double selfY, final double selfZ,
         final double targetX, final double targetY, final double targetZ, final double stopDistance,
-        final boolean avoidLiquid
+        final boolean avoidLiquid, final boolean onGround
     ) {
         if (pathComputedFor != null && !currentPath.isEmpty() && stopDistance == stopDistanceComputedFor
             && avoidLiquid == avoidLiquidComputedFor) {
@@ -114,11 +135,26 @@ public final class PathTracker {
 
             Move nextWaypoint = currentPath.peekFirst();
             double sdx = nextWaypoint.x - selfX;
-            double sdy = nextWaypoint.y - selfY;
             double sdz = nextWaypoint.z - selfZ;
-            double selfDrift = Math.sqrt(sdx * sdx + sdy * sdy + sdz * sdz);
+            double selfDriftHorizontal = Math.sqrt(sdx * sdx + sdz * sdz);
+            // Vertical drift is only ever checked while ON GROUND -- see
+            // SELF_DRIFT_REPLAN_DISTANCE_VERTICAL's own docstring for why
+            // this exists (catching a fall off a jump's own landing spot
+            // back onto solid ground somewhere unreachable), but the
+            // exact same check applied mid-AIR fires constantly during
+            // any perfectly normal, successful jump arc -- a jump's own
+            // vertical swing routinely exceeds MAX_STEP_HEIGHT well
+            // before landing (that's the entire point of a jump move),
+            // so checking it while airborne forced a mid-flight replan
+            // from a fractional, off-block position with no real floor
+            // under it, confirmed live as a fresh NO_PATH firing during
+            // an otherwise-successful jump that was about to land right
+            // on target.
+            double selfDriftVertical = onGround ? Math.abs(nextWaypoint.y - selfY) : 0.0;
 
-            if (targetMoved <= REPLAN_DISTANCE && selfDrift <= SELF_DRIFT_REPLAN_DISTANCE) {
+            if (targetMoved <= REPLAN_DISTANCE
+                && selfDriftHorizontal <= SELF_DRIFT_REPLAN_DISTANCE_HORIZONTAL
+                && selfDriftVertical <= SELF_DRIFT_REPLAN_DISTANCE_VERTICAL) {
                 return; // existing path is still aimed close enough to the target, and we're still on it
             }
         }
