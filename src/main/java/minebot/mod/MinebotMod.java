@@ -488,6 +488,25 @@ public final class MinebotMod implements ClientModInitializer {
                 // (see task/SleepTask's own docstring for why).
                 commandBus.publish(new Command.Sleep());
             }
+            case "query" -> {
+                // Read-only introspection -- lets Python ask "what is the
+                // mod's own live state right now" instead of having to
+                // infer it indirectly from broadcast events (position/
+                // health/entity/...), which is exactly what the in-game
+                // test harness needs to assert against real final SM
+                // state (e.g. "did !stop actually return LegsState to
+                // IDLE" -- see LegsStateMachine's own recent isStopCommand
+                // fix, found live because nothing could assert this
+                // directly before). Deliberately NOT routed through
+                // CommandBus/any StateMachine -- a query has no game-world
+                // effect at all, so there's nothing for a Command/edge to
+                // react to; it just reads currentState() off the relevant
+                // StateMachine field(s) and replies immediately. See
+                // handleQuery's own docstring for the "arg" values
+                // supported so far.
+                String arg = json.has("arg") ? json.get("arg").getAsString() : null;
+                handleQuery(arg);
+            }
             case "chat" -> {
                 // Re-added -- was one of the commands stripped down to
                 // nothing during the peer-state-machine rewrite (see this
@@ -516,6 +535,45 @@ public final class MinebotMod implements ClientModInitializer {
             }
             default -> LOGGER.warn("control channel: unknown command type '{}'", type);
         }
+    }
+
+    /**
+     * Handles `{"type": "query", "arg": "..."}` -- replies with a single
+     * `query_result` event carrying whatever `arg` asked for. `arg` values
+     * supported so far:
+     *
+     * - "player_intention" -- PlayerIntentionState's own currentState()
+     *   (IDLE/FOLLOW/DEFEND).
+     * - "legs" -- LegsState's own currentState() (IDLE/NAVIGATE/FLEE/
+     *   GO_TO_DEATH_POSITION/PICKUP_ITEMS/GOTO).
+     * - "hands" -- HandsState's own currentState() (IDLE/OPEN_DOOR/EAT/
+     *   MELEE_ATTACK/DRAW_BOW/DRAW_CROSSBOW/MINE).
+     * - "head" -- HeadState's own currentState() (IDLE/NAVIGATE/
+     *   AIM_AT_TARGET/FLEE/MINE).
+     *
+     * An unrecognized/missing `arg` replies with `"error"` set instead of
+     * `"result"` -- Python-side callers can then raise a clear exception
+     * rather than silently misinterpreting a missing/null result as some
+     * particular state value. Deliberately one flat `arg` -> `result`
+     * shape for every kind of query, not a different event `type` per
+     * queryable thing -- keeps adding a new queryable fact a one-line
+     * switch addition here, no new wire message type/Python-side event
+     * handler needed each time.
+     */
+    private void handleQuery(final String arg) {
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "query_result");
+        event.addProperty("arg", arg);
+
+        switch (arg == null ? "" : arg) {
+            case "player_intention" -> event.addProperty("result", playerIntentionStateMachine.currentState().name());
+            case "legs" -> event.addProperty("result", legsStateMachine.currentState().name());
+            case "hands" -> event.addProperty("result", handsStateMachine.currentState().name());
+            case "head" -> event.addProperty("result", headStateMachine.currentState().name());
+            default -> event.addProperty("error", "unknown query arg: " + arg);
+        }
+
+        controlClient.sendEvent(event.toString());
     }
 
     private void broadcastChatEvent(final String sender, final String text) {
