@@ -505,7 +505,7 @@ public final class MinebotMod implements ClientModInitializer {
                 // handleQuery's own docstring for the "arg" values
                 // supported so far.
                 String arg = json.has("arg") ? json.get("arg").getAsString() : null;
-                handleQuery(arg);
+                handleQuery(arg, json);
             }
             case "chat" -> {
                 // Re-added -- was one of the commands stripped down to
@@ -572,6 +572,20 @@ public final class MinebotMod implements ClientModInitializer {
      *   wire traffic for every other consumer (minebot-frontend's live
      *   viewer, normal play) that never asks.
      *
+     * - "block" -- the real block ID at a given world position, read
+     *   directly off ClientLevel (the same loaded chunk data pathfinding
+     *   itself reads -- see Movements' own getNeighbors/safeOrBreak).
+     *   Requires "x"/"y"/"z" (integer block coordinates) alongside "arg"
+     *   in the request itself -- carried in the reply as its own "block"
+     *   string (e.g. "minecraft:air", "minecraft:stone"), not "result".
+     *   Added specifically to debug a real live report: NO_PATH on
+     *   ground the human operator confirmed was flat/void -- being able
+     *   to ask the mod directly "what block do you actually see at this
+     *   exact coordinate" rules out (or confirms) a real terrain/chunk-
+     *   loading discrepancy between what a human sees and what
+     *   pathfinding's own block reads see, without needing to guess from
+     *   pathfinding's own log output alone.
+     *
      * An unrecognized/missing `arg` replies with `"error"` set instead of
      * `"result"` -- Python-side callers can then raise a clear exception
      * rather than silently misinterpreting a missing/null result as some
@@ -581,7 +595,7 @@ public final class MinebotMod implements ClientModInitializer {
      * switch addition here, no new wire message type/Python-side event
      * handler needed each time.
      */
-    private void handleQuery(final String arg) {
+    private void handleQuery(final String arg, final JsonObject request) {
         JsonObject event = new JsonObject();
         event.addProperty("type", "query_result");
         event.addProperty("arg", arg);
@@ -604,6 +618,19 @@ public final class MinebotMod implements ClientModInitializer {
                     position.addProperty("pitch", player.getXRot());
                     position.addProperty("on_ground", player.onGround());
                     event.add("position", position);
+                }
+            }
+            case "block" -> {
+                ClientLevel level = Minecraft.getInstance().level;
+                if (level == null || !request.has("x") || !request.has("y") || !request.has("z")) {
+                    event.addProperty("error", "block query requires x/y/z and a loaded level");
+                } else {
+                    net.minecraft.core.BlockPos pos = new net.minecraft.core.BlockPos(
+                        request.get("x").getAsInt(), request.get("y").getAsInt(), request.get("z").getAsInt()
+                    );
+                    String blockId = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(level.getBlockState(pos).getBlock()).toString();
+                    event.addProperty("block", blockId);
+                    event.addProperty("loaded", level.isLoaded(pos));
                 }
             }
             default -> event.addProperty("error", "unknown query arg: " + arg);

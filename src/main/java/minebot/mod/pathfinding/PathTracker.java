@@ -69,6 +69,21 @@ public final class PathTracker {
     // instance is shared across every Legs node that walks), and vice
     // versa.
     private boolean avoidLiquidComputedFor;
+    // True only immediately after a real, COMPLETED search genuinely
+    // found no route at all (AStar.Status.NO_PATH or TIMEOUT with an
+    // empty path) -- see maybeReplan's own body for exactly where this is
+    // set/cleared. Deliberately NOT the same thing as "currentPath is
+    // empty": a fresh PathTracker (nothing computed yet) and "we're
+    // already at the goal" (AStar.Status.SUCCESS with a trivially empty
+    // path, see maybeReplan's own early-return comment) both also leave
+    // currentPath empty, and neither of those means "genuinely blocked" --
+    // conflating them would make walkTowardNavTarget's own noPath() gate
+    // (see its own docstring for why it exists) refuse to walk in cases
+    // that were never actually blocked at all. Reset to false the instant
+    // a later replan succeeds, so a temporarily-unreachable target (e.g.
+    // a moving FOLLOW target that walks back into range) isn't stuck
+    // "blocked" forever once a real route exists again.
+    private boolean lastSearchFoundNoPath;
 
     /**
      * (Re)computes a path toward (targetX, targetY, targetZ) if we don't
@@ -120,7 +135,12 @@ public final class PathTracker {
         if (!level.isLoaded(new net.minecraft.core.BlockPos(startX, startY - 1, startZ))) {
             // No block data under our own feet -- e.g. chunks haven't
             // loaded yet. Pathfinding can't do better than guessing here,
-            // so don't pretend to have a plan.
+            // so don't pretend to have a plan. NOT the same as a real
+            // completed NO_PATH search (see lastSearchFoundNoPath's own
+            // docstring) -- a transient missing-chunk-data condition
+            // shouldn't permanently block movement the way a genuinely
+            // unreachable target should.
+            lastSearchFoundNoPath = false;
             return;
         }
 
@@ -157,12 +177,16 @@ public final class PathTracker {
             // GoalNear.isEnd() (we're already within stopDistance), so A*
             // succeeded trivially with a zero-length path. Leave
             // currentPath empty; resolveMovementIntent's raw-target
-            // fallback already stops us correctly once close enough.
+            // fallback already stops us correctly once close enough. NOT
+            // a NO_PATH -- explicitly clear the flag (a REAL success, just
+            // trivially short).
+            lastSearchFoundNoPath = false;
             return;
         }
 
         if ((result.status() == AStar.Status.SUCCESS || result.status() == AStar.Status.PARTIAL) && !result.path().isEmpty()) {
             currentPath.addAll(result.path());
+            lastSearchFoundNoPath = false;
             // Temporarily promoted from debug to info -- this client's
             // default log4j config filters debug output entirely (see
             // BlockBreaker's own per-tick diagnostic for the same
@@ -176,8 +200,23 @@ public final class PathTracker {
                 result.path().size(), result.status(), result.cost(), result.path()
             );
         } else {
-            MinebotMod.LOGGER.info("pathfinding: no path found (status={}), falling back to raw target-following", result.status());
+            // A genuine, completed search that found no route at all --
+            // see lastSearchFoundNoPath's own docstring for why
+            // walkTowardNavTarget now stops instead of blindly walking
+            // straight at the raw target here (per explicit direction:
+            // "walking in straight line towards the target is undesired
+            // behavior, NO_PATH should block the bot" -- the old
+            // straight-line fallback risked walking off ledges/into
+            // obstacles/into hazards exactly when pathfinding had already
+            // determined there was no safe way to actually get there).
+            lastSearchFoundNoPath = true;
+            MinebotMod.LOGGER.info("pathfinding: no path found (status={}), blocking movement", result.status());
         }
+    }
+
+    /** True only right after a real, completed search found no route at all -- see the field's own docstring. */
+    public boolean lastSearchFoundNoPath() {
+        return lastSearchFoundNoPath;
     }
 
     /**
@@ -252,6 +291,7 @@ public final class PathTracker {
         currentPath.clear();
         pathComputedFor = null;
         stopDistanceComputedFor = Double.NaN;
+        lastSearchFoundNoPath = false;
     }
 
     /** Read-only view of the currently planned path, in walk order. */

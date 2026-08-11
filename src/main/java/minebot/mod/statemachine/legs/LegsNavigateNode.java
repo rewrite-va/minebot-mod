@@ -247,14 +247,41 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         double targetZ = targetPosition.z();
 
         ctx.pathTracker.maybeReplan(ctx.level, ctx.player, selfX, selfY, selfZ, targetX, targetY, targetZ, stopDistanceValue, avoidLiquid);
+
+        if (ctx.pathTracker.lastSearchFoundNoPath()) {
+            // A real, completed search found no route at all -- stop
+            // rather than blindly walking straight at the raw target, per
+            // explicit direction: "walking in straight line towards the
+            // target is undesired behavior, NO_PATH should block the
+            // bot". The old straight-line fallback (see this method's own
+            // git history) risked walking off ledges, into obstacles, or
+            // into hazards exactly when pathfinding had already
+            // determined there was no SAFE way to actually get there --
+            // continuing to move toward an unreachable target on blind
+            // faith was never actually useful, just risky. See
+            // PathTracker.lastSearchFoundNoPath's own docstring for why
+            // this is NOT the same as "no plan yet" (a fresh/first-tick
+            // NAV_TARGET) or "already arrived" (a trivially empty
+            // success) -- both of those still fall through to the normal
+            // raw-target-aim path below, unaffected.
+            ctx.input.setIntent(new MovementIntent());
+            ctx.blackboard.put(WAYPOINT_COORDINATES, null);
+            ctx.blackboard.put(WAYPOINT_TO_BREAK, Collections.emptyList());
+            ctx.blackboard.put(WAYPOINT_DIG_STANCE, null);
+            return;
+        }
+
         Move waypoint = ctx.pathTracker.nextWaypoint(ctx.level, selfX, selfY, selfZ, ctx.player.onGround());
         ctx.blackboard.put(WAYPOINT_COORDINATES, waypoint != null ? new BlockPos(waypoint.x, waypoint.y, waypoint.z) : null);
         ctx.blackboard.put(WAYPOINT_TO_BREAK, waypoint != null ? waypoint.toBreak : Collections.emptyList());
         ctx.blackboard.put(WAYPOINT_DIG_STANCE, waypoint != null ? waypoint.digStance : null);
 
         // Aim at the next unreached waypoint's block center, or the raw
-        // target if we have no plan (no path found / not yet computed) --
-        // same as the old shared pipeline.
+        // target if we have no plan yet (the very first tick after a
+        // fresh NAV_TARGET, before maybeReplan's own first real search
+        // has run) or have already arrived -- same as the old shared
+        // pipeline. A genuine NO_PATH never reaches here at all (see the
+        // early return above).
         double aimX = waypoint != null ? waypoint.x + 0.5 : targetX;
         double aimY = waypoint != null ? waypoint.y : targetY;
         double aimZ = waypoint != null ? waypoint.z + 0.5 : targetZ;
