@@ -153,6 +153,7 @@ public final class LegsStateMachine {
         Predicate<TickContext> shouldFlee = ctx -> HandsEatNode.lowHealth(ctx) && InventoryController.hasFood(ctx.player);
         Predicate<TickContext> isPickupCommand = ctx -> Commands.has(ctx.commands, Command.Pickup.class);
         Predicate<TickContext> isGotoCommand = ctx -> Commands.has(ctx.commands, Command.Goto.class);
+        Predicate<TickContext> isStopCommand = ctx -> Commands.has(ctx.commands, Command.Stop.class);
         // FIGHT_JUST_ENDED itself is a real edge (fighting last tick, not
         // fighting this tick) computed centrally by CombatEngagement.
         // tickEdgeDetection -- see its own docstring for why that can't
@@ -203,6 +204,21 @@ public final class LegsStateMachine {
             new Edge<>(LegsState.GOTO, LegsState.FLEE, ctx -> gotoNode.isFinished() && shouldFlee.test(ctx)),
             new Edge<>(LegsState.GOTO, LegsState.NAVIGATE, ctx -> gotoNode.isFinished() && !shouldFlee.test(ctx) && shouldNavigate.test(ctx)),
             new Edge<>(LegsState.GOTO, LegsState.IDLE, ctx -> gotoNode.isFinished() && !shouldFlee.test(ctx) && !shouldNavigate.test(ctx)),
+            // !stop must abandon an in-progress !goto too, not just
+            // FOLLOW/DEFEND (PlayerIntentionStateMachine's own isStopCommand
+            // edges) -- GOTO is driven directly off Command.Goto/NavIntent
+            // with no ongoing PlayerIntention-published target the way
+            // FOLLOW/DEFEND have, so nothing here ever naturally cleared
+            // once PlayerIntention itself returned to IDLE. Confirmed live,
+            // caught by the in-game test harness (minebot/testing/tests.py's
+            // own setup calling actions.reset_to_idle before every test):
+            // sending !stop while GOTO was still active reset
+            // PlayerIntentionState correctly but left LegsState stuck in
+            // GOTO, still walking toward the old target, since no edge here
+            // ever checked for a Stop command at all. gotoNode.onExit
+            // already clears NAV_TARGET/NAV_ARRIVED (see its own docstring)
+            // -- this only needed the missing edge, not a new node change.
+            new Edge<>(LegsState.GOTO, LegsState.IDLE, isStopCommand),
 
             // Post-fight pickup -- see this class's own docstring for why
             // this is an edge-trigger (FightJustEnded), ranked alongside
