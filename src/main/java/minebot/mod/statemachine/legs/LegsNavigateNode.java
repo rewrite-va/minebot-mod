@@ -186,10 +186,22 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
     // acceleration, not instant), so a handful of ticks of forward
     // pressure should already be well clear of that -- not tuned against
     // a precise measured vanilla constant, just picked comfortably above
-    // the ramp-up window. Worth re-checking against a live retry of the
-    // exact jump this was built for ((-350,105,-1388) -> (-350,106,-1391))
-    // if it still falls short.
-    private static final int SPRINT_RUNUP_TICKS_REQUIRED = 8;
+    // the ramp-up window.
+    //
+    // Lowered from 8 to 5, confirmed live via a direct tick-by-tick DEBUG
+    // trace (goto_jump_2's own scenario -- a 1-block-deep platform before
+    // a 2-block gap+climb jump): the bot only ever accumulates ~5-6 real
+    // runup ticks before walking off the platform's own edge, so 8 was
+    // simply unreachable on a platform this size -- it walked off the
+    // edge 1-2 ticks short of the threshold on EVERY attempt, never
+    // firing the jump at all (confirmed by the human operator manually
+    // clearing this exact gap from the same ~1 block of runway with no
+    // running). 5 still leaves a real, if shorter, sprint-ramp-up window
+    // above LivingEntity's own gradual acceleration, while actually
+    // fitting within a tight platform's real available runway. Revisit
+    // if a future scenario needs more runway than this allows and 5
+    // turns out to be too short for a DIFFERENT jump.
+    private static final int SPRINT_RUNUP_TICKS_REQUIRED = 5;
 
     @Override
     public void onEnter(final TickContext ctx, final LegsState previousState) {
