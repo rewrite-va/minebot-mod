@@ -550,6 +550,27 @@ public final class MinebotMod implements ClientModInitializer {
      *   MELEE_ATTACK/DRAW_BOW/DRAW_CROSSBOW/MINE).
      * - "head" -- HeadState's own currentState() (IDLE/NAVIGATE/
      *   AIM_AT_TARGET/FLEE/MINE).
+     * - "position" -- the bot's own live x/y/z/yaw/pitch, read fresh
+     *   on-demand (not a `"result"` string like the others -- carried as
+     *   its own `"position"` object with the same field shape the regular
+     *   broadcast `position` event uses). Added specifically so Python can
+     *   ask "where are you right now" on demand rather than only ever
+     *   waiting for the next broadcast `position` event -- see
+     *   maybeBroadcastPositionEvent's own docstring for why that broadcast
+     *   is exact-dedup'd (buffer of 1): a bot that goes genuinely
+     *   motionless (e.g. wedged against a wall while LegsGotoNode keeps
+     *   failing to find a path to an unreachable target) produces
+     *   bit-identical snapshots forever, so no further `position` event
+     *   ever goes out on its own -- confirmed live as a real bug, a
+     *   caller polling for "the next position event" (this repo's own
+     *   actions.wait_for_position/goto/teleport) then hangs forever
+     *   waiting for something that was never coming, even though the
+     *   client itself is alive and ticking normally. `!query position`
+     *   gives Python a way to break that specific deadlock (or just
+     *   confirm the bot really is frozen) without changing the broadcast
+     *   behavior itself at all -- no forced periodic re-send, no extra
+     *   wire traffic for every other consumer (minebot-frontend's live
+     *   viewer, normal play) that never asks.
      *
      * An unrecognized/missing `arg` replies with `"error"` set instead of
      * `"result"` -- Python-side callers can then raise a clear exception
@@ -570,6 +591,21 @@ public final class MinebotMod implements ClientModInitializer {
             case "legs" -> event.addProperty("result", legsStateMachine.currentState().name());
             case "hands" -> event.addProperty("result", handsStateMachine.currentState().name());
             case "head" -> event.addProperty("result", headStateMachine.currentState().name());
+            case "position" -> {
+                LocalPlayer player = Minecraft.getInstance().player;
+                if (player == null) {
+                    event.addProperty("error", "no local player yet");
+                } else {
+                    JsonObject position = new JsonObject();
+                    position.addProperty("x", player.getX());
+                    position.addProperty("y", player.getY());
+                    position.addProperty("z", player.getZ());
+                    position.addProperty("yaw", player.getYRot());
+                    position.addProperty("pitch", player.getXRot());
+                    position.addProperty("on_ground", player.onGround());
+                    event.add("position", position);
+                }
+            }
             default -> event.addProperty("error", "unknown query arg: " + arg);
         }
 
