@@ -82,7 +82,21 @@ public final class LegsGotoNode implements StateNode<LegsState> {
         double distance = ctx.player.position().distanceTo(target);
         boolean withinRange = distance <= ARRIVAL_DISTANCE;
         ctx.blackboard.put(NavIntent.NAV_ARRIVED, withinRange);
-        finished = withinRange;
+        // Give up (report finished) once pathfinding has genuinely
+        // determined there's no route at all, not just "haven't arrived
+        // yet" -- see PathTracker.lastSearchFoundNoPath's own docstring,
+        // and walkTowardNavTarget's own early-return that now stops
+        // movement on NO_PATH instead of walking blindly at the raw
+        // target. Confirmed live as a real, newly-exposed bug: blocking
+        // movement without ALSO giving this node a way to exit meant a
+        // genuinely unreachable !goto target left the bot stuck in
+        // LegsState.GOTO forever -- motionless (correctly, no longer
+        // walking off ledges/into hazards) but never transitioning back
+        // to IDLE either, since withinRange alone was the only exit
+        // condition and a blocked target can never satisfy it. A human
+        // (or a test harness) had no way to recover except an explicit
+        // !stop.
+        finished = withinRange || ctx.pathTracker.lastSearchFoundNoPath();
     }
 
     @Override
