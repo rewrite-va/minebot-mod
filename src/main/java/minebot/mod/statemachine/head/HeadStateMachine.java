@@ -88,11 +88,12 @@ public final class HeadStateMachine {
     private HeadStateMachine() {
     }
 
-    /** Every LegsState that walks toward a real NavIntent-published target via WAYPOINT_COORDINATES -- see this class's own docstring for why this is explicit rather than just LegsState.NAVIGATE (GO_TO_DEATH_POSITION/PICKUP_ITEMS need Head to look toward their own waypoints too). Deliberately excludes FLEE, which has its own dedicated HeadState/edges below even though it maps to the same underlying HeadNavigateNode instance. */
+    /** Every LegsState that walks toward a real NavIntent-published target via WAYPOINT_COORDINATES -- see this class's own docstring for why this is explicit rather than just LegsState.NAVIGATE (GO_TO_DEATH_POSITION/PICKUP_ITEMS need Head to look toward their own waypoints too). Deliberately excludes FLEE, which has its own dedicated HeadState/edges below even though it maps to the same underlying HeadNavigateNode instance. GOTO added after a real live bug: LegsGotoNode publishes through the exact same WAYPOINT_COORDINATES/NAV_TARGET channel NAVIGATE does (delegates its own walk to LegsNavigateNode.walkTowardNavTarget -- see its own docstring), but was missing from this set entirely, so Head stayed frozen in IDLE for the WHOLE DURATION of every !goto -- confirmed live via head: entering IDLE never firing again after !goto started, while Legs kept trying to walk. The bot's own yaw never turned to actually face the walking target at all, which is why a jump waypoint's own facingWaypoint check (LegsNavigateNode's own runup-gating logic) kept flickering false/true essentially at random and the bot got stuck jittering in place, never building enough runup to actually jump -- not a jump/runup bug at all, a missing Head-aims-at-target wiring bug one layer up. */
     private static final Set<LegsState> LEGS_NAVIGATING_STATES = EnumSet.of(
         LegsState.NAVIGATE,
         LegsState.GO_TO_DEATH_POSITION,
-        LegsState.PICKUP_ITEMS
+        LegsState.PICKUP_ITEMS,
+        LegsState.GOTO
     );
 
     public static StateMachine<HeadState> create(final StateMachine<LegsState> legsStateMachine, final StateMachine<PlayerIntentionState> playerIntentionStateMachine) {
