@@ -166,7 +166,21 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
      * a stop, a sideways correction, or a fresh path replan can't leave
      * a stale count around from an unrelated earlier approach.
      */
-    private static final BlackboardKey<Integer> SPRINT_RUNUP_TICKS = new BlackboardKey<>("SPRINT_RUNUP_TICKS");
+    // Package-visible (not private) -- LegsGotoNode also needs to reset
+    // this on its own onEnter, same as this class's own onEnter/onExit do
+    // (see both their own docstrings). Confirmed live as a real bug:
+    // LegsGotoNode never reset either this counter or ctx.pathTracker on
+    // entry, so stale runup-tick/plan state from whatever walk (a
+    // DIFFERENT !goto, or an earlier !follow/NAVIGATE session) happened
+    // to run immediately before could leak into a fresh !goto -- observed
+    // live as a perfectly alternating FAIL/PASS/FAIL/PASS pattern across
+    // repeated runs of the exact same scenario: a run that ended
+    // mid-flight (the outer test timeout cancelling it before arrival)
+    // left this counter/plan in a different state than a run that
+    // completed cleanly, and that leftover state fed directly into
+    // whether the NEXT run's own tight-runway jump could build enough
+    // runupTicks before reaching the platform edge.
+    static final BlackboardKey<Integer> SPRINT_RUNUP_TICKS = new BlackboardKey<>("SPRINT_RUNUP_TICKS");
     // A real vanilla sprint ramps up from a standing start over roughly
     // half a second (LivingEntity's own gradual speed-attribute
     // acceleration, not instant), so a handful of ticks of forward
@@ -446,7 +460,6 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
                 runupTicks, hasRunup, wantsToJump, ctx.player.onGround()
             );
         }
-
         ctx.input.setIntent(intent);
     }
 

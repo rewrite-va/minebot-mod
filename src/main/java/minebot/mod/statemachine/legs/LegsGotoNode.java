@@ -58,6 +58,23 @@ public final class LegsGotoNode implements StateNode<LegsState> {
     @Override
     public void onEnter(final TickContext ctx, final LegsState previousState) {
         finished = false;
+        // Confirmed live as a real bug: neither of these was ever reset
+        // on GOTO's own entry (unlike LegsNavigateNode's own onEnter,
+        // which does both -- see its own docstring) -- a fresh !goto
+        // could inherit a stale cached A* plan (ctx.pathTracker, shared
+        // across every Legs node that walks) or a stale
+        // SPRINT_RUNUP_TICKS counter from whatever walk happened to run
+        // immediately before this one (a DIFFERENT !goto, or an earlier
+        // !follow/NAVIGATE session). Observed live as a perfectly
+        // alternating FAIL/PASS/FAIL/PASS pattern across repeated runs of
+        // the exact same tight-runway jump scenario -- a run that ended
+        // mid-flight (cancelled by the outer test timeout before arrival)
+        // left this state different from a run that completed cleanly,
+        // and that leftover state fed directly into whether the NEXT
+        // run's own jump could build enough runup before reaching the
+        // platform edge.
+        ctx.pathTracker.reset();
+        ctx.blackboard.put(LegsNavigateNode.SPRINT_RUNUP_TICKS, 0);
         Command.Goto command = Commands.find(ctx.commands, Command.Goto.class);
         // Defensive only -- LegsStateMachine only ever enters GOTO off a
         // fresh Command.Goto being present this tick (see its own edge
@@ -104,6 +121,13 @@ public final class LegsGotoNode implements StateNode<LegsState> {
         ctx.blackboard.put(NavIntent.NAV_TARGET, null);
         ctx.blackboard.put(NavIntent.NAV_ARRIVED, true);
         ctx.blackboard.put(LegsNavigateNode.WAYPOINT_COORDINATES, null);
+        // Matches LegsNavigateNode's own onExit -- see onEnter's own
+        // docstring for the real bug leaving this stale caused. Belt and
+        // suspenders alongside onEnter's own reset: whichever node enters
+        // NEXT (this one again, or NAVIGATE) starts from a guaranteed-zero
+        // counter either way, not just "usually zero because onEnter
+        // happened to reset it."
+        ctx.blackboard.put(LegsNavigateNode.SPRINT_RUNUP_TICKS, 0);
         target = null;
     }
 
