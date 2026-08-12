@@ -569,6 +569,33 @@ public final class MinebotMod implements ClientModInitializer {
                     }
                 }
             }
+            case "gamemode" -> {
+                // Structured `/gamemode <mode> @s`, NOT routed through the
+                // "chat" case below -- exists as its own command so Python
+                // can request a gamemode change and separately confirm it
+                // actually landed via `!query gamemode` (handleQuery's own
+                // "gamemode" case), the same "send the command, then poll
+                // an on-demand query for the real result" shape `teleport`/
+                // query_position already use elsewhere (see actions.
+                // teleport's own docstring on the Python side for why
+                // active polling, not a passive broadcast, is the right
+                // way to confirm a state change here). Added specifically
+                // so the in-game test harness can force its own world's
+                // player out of CREATIVE before running -- see
+                // TestWorldBootstrap's own docstring for why running the
+                // disposable pytest-launched world in creative made a
+                // real jump-retry bug (two real jump-key presses close
+                // together) trigger vanilla's own double-tap-space-
+                // toggles-flying detection, permanently wedging the bot
+                // hovering with zero gravity; the SAME risk exists on any
+                // OTHER world (e.g. a real LAN session) this mod's own
+                // account happens to be in creative on, which
+                // TestWorldBootstrap's own fix has no reach into at all.
+                if (json.has("mode")) {
+                    String mode = json.get("mode").getAsString();
+                    sendChat("/gamemode " + mode + " @s");
+                }
+            }
             case "chat" -> {
                 // Re-added -- was one of the commands stripped down to
                 // nothing during the peer-state-machine rewrite (see this
@@ -694,6 +721,23 @@ public final class MinebotMod implements ClientModInitializer {
                     event.addProperty("block", blockId);
                     event.addProperty("loaded", level.isLoaded(pos));
                 }
+            }
+            case "gamemode" -> {
+                // Reads the client's own real current GameType off
+                // MultiPlayerGameMode (Minecraft.getInstance().gameMode),
+                // the same object InventoryController already uses --
+                // NOT LocalPlayer.getAbilities().instabuild/mayfly, which
+                // only reflect creative-derived ABILITY flags an operator
+                // could independently toggle without a real gamemode
+                // change (e.g. mayfly granted separately) and so aren't a
+                // reliable stand-in for "what real /gamemode is this
+                // player in right now" the way this needs. Paired with
+                // the "gamemode" command above -- Python sends `!gamemode
+                // survival`, then polls this query until it reads back
+                // "survival", confirming the change actually landed
+                // before proceeding, rather than assuming a fixed delay
+                // was enough.
+                event.addProperty("result", Minecraft.getInstance().gameMode.getPlayerMode().getName());
             }
             default -> event.addProperty("error", "unknown query arg: " + arg);
         }
