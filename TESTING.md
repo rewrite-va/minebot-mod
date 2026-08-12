@@ -36,7 +36,12 @@ bot's real broadcast state) lives once, in the `minebot` repo under
   since it was originally built and isn't repeated here.
 
 Both entry points share the same `TestCase`/`TestContext` shapes, so a
-test is only ever written once.
+test is only ever written once. Both also save whatever gamemode their
+own session actually started in, switch to survival before running
+anything, and restore the original gamemode once done -- see "Gamemode
+command/query" below for why (creative lets an accidental double jump-key
+press toggle flight, which can otherwise look exactly like a permanent
+physics wedge).
 
 ## Litematica schematic fixtures + wool waypoints
 
@@ -320,24 +325,56 @@ at catching:
   Fixed via a new `RUNUP_WAYPOINT` blackboard key that resets both
   `SPRINT_RUNUP_TICKS` and `JUMP_PLAN` the instant the current waypoint
   changes.
-- **The bootstrapped test world ran in CREATIVE, so any double jump-key
-  press -- however it happens -- silently toggles flight instead of
-  failing loudly.** Even after fixing the specific double-jump trigger
-  above, a real jump sequence can still legitimately press jump twice in
-  quick succession in other scenarios (retried jumps, replans, ...);
-  creative made every one of those a potential flight-toggle instead of
-  a harmless no-op. A `goto_leaves_2` failure that looked like a
-  permanent physics wedge (bot frozen mid-air, never moving again) was
-  actually the bot flying: confirmed live via the `-Dminebot.debugNavigate`
-  flag's own `navigate[collision]` line -- `deltaMovement.y == 0.0`
-  (zero gravity) and `LocalPlayer.getAbilities().flying == true` from the
-  moment collision logging started. Fixed at the root: `TestWorldBootstrap`
-  now switches the local player to survival right after they spawn
-  (`/gamemode survival @s`), while keeping the WORLD's own
-  `allowCommands` on for `/fill`/`/tp` (operator command permission is
-  independent of any individual player's own gamemode) -- makes the
-  whole failure mode structurally impossible instead of chasing every
-  possible way two jumps could land close together.
+- **A world running in CREATIVE lets any double jump-key press --
+  however it happens -- silently toggle flight instead of failing
+  loudly.** Even after fixing the specific double-jump trigger above, a
+  real jump sequence can still legitimately press jump twice in quick
+  succession in other scenarios (retried jumps, replans, ...); creative
+  makes every one of those a potential flight-toggle instead of a
+  harmless no-op. A `goto_leaves_2` failure that looked like a permanent
+  physics wedge (bot frozen mid-air, never moving again) was actually the
+  bot flying: confirmed live via the `-Dminebot.debugNavigate` flag's own
+  `navigate[collision]` line -- `deltaMovement.y == 0.0` (zero gravity)
+  and `LocalPlayer.getAbilities().flying == true` from the moment
+  collision logging started.
+
+  First fixed narrowly (`TestWorldBootstrap` switching the freshly-
+  bootstrapped pytest world's own player to survival right after they
+  spawn) -- but that fix has no reach into a real LAN/`!runtest` session,
+  a completely separate world this mod's own account can independently
+  be in creative on. Generalized into a real `gamemode` wire command +
+  `gamemode` query (see "Gamemode command/query" below) that EITHER entry
+  point can use, then wired into both: `tests/integration/conftest.py`'s
+  own session fixture and `TestRunner.run` (backing `!runtest`) each now
+  save whatever gamemode the session actually started in, switch to
+  survival before running any test, and restore the ORIGINAL gamemode
+  (not a hardcoded value) once every test in that run/session has
+  finished -- world-level `allowCommands` stays on throughout for
+  `/fill`/`/tp` (operator command permission is independent of any
+  individual player's own gamemode), so this makes the whole flight-
+  toggle failure mode structurally impossible for a test run without
+  permanently changing whatever gamemode a human was actually using the
+  session for.
+
+## Gamemode command/query
+
+`!gamemode <mode>` sends a real `/gamemode <mode> @s` (`MinebotMod`'s
+"gamemode" wire case); `!query gamemode` reads the client's own real
+current `GameType` off `Minecraft.getInstance().gameMode.getPlayerMode()`
+-- NOT `LocalPlayer.getAbilities().instabuild`/`mayfly`, which only
+reflect creative-DERIVED ability flags an operator could independently
+toggle without a real gamemode change, so aren't a reliable stand-in for
+"what gamemode is this player actually in right now."
+
+`minebot/testing/actions.py::wait_for_gamemode(ctx, mode, timeout)` is
+the shared send-then-poll primitive both test entry points use around
+their own run (see the "double jump-key press" bug entry above for why):
+sends the command, then polls the query until it reads back the
+requested mode, the same "don't trust a fixed delay, confirm the change
+actually landed" shape `teleport()`/`send_teleport` already use for a
+real `/tp`. A test entry point wanting the SAME protection on some other
+world only needs to call this once around its own run -- it's not tied
+to either `conftest.py` or `TestRunner` specifically.
 
 ## Open questions / not yet decided
 
