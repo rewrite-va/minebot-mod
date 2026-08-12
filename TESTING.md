@@ -61,7 +61,7 @@ ordinary placeable blocks (`litematic.WAYPOINT_BLOCK_ROLES`):
 | Wool color | Role | Meaning |
 |---|---|---|
 | White | `start` | Where the test's `setup` teleports the bot before sending `!goto` |
-| Yellow | `path` | The bot's real walked trail must pass within `WAYPOINT_RADIUS` (0.75 blocks, checked against the block's real CENTER) of this point at some point |
+| Yellow | `path` | The bot's real walked trail must pass within `WAYPOINT_RADIUS` (0.5 blocks -- exactly the block's own extent from its real CENTER, so the sphere never bleeds into a neighboring cell) of this point at some point |
 | Red | `forbidden` | The bot's real walked trail must NEVER come within `WAYPOINT_RADIUS` of this point |
 | Green or Lime | `end` | The `!goto` target itself |
 | Magenta | `unreachable` | A target the test asserts the bot never reaches at all (`actions.assert_goto_never_arrives`) |
