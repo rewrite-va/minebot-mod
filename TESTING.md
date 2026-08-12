@@ -86,6 +86,9 @@ waypoints it cares about.
 | `goto_onto_schematic` | `simple_goto.litematic` | Places a small fixture, `!goto`s onto a block on it, asserts arrival -- then always clears the placed blocks |
 | `goto_jump_1` | `goto_jump_1.litematic` | A 1-block gap; asserts the bot jumps across without falling into the forbidden column below the gap |
 | `goto_jump_2` | `goto_jump_2.litematic` | A 2-block gap + 1-block climb; asserts the bot jumps across without falling into either forbidden column |
+| `goto_jump_3` | `goto_jump_3.litematic` | A longer course combining a required path checkpoint with a 2-block forbidden gap; asserts the bot walks the checkpoint without falling into either forbidden column |
+| `goto_leaves_1` | `goto_leaves_1.litematic` | A target blocked only by head clearance under floating leaves (2-block-tall hitbox, not a horizontal wall); asserts the bot never reaches it AND never attempts a jump (`assert_never_jumps`) |
+| `goto_leaves_2` | `goto_leaves_2.litematic` | A reachable room with the same leaves fixture; asserts the bot walks the required checkpoint, avoids every forbidden wall cell, and jumps exactly once (`assert_jumps_done`) |
 | `goto_impossible` | `goto_impossible_1.litematic` | A target genuinely blocked by a wall; asserts the bot never reaches it (`assert_goto_never_arrives`) |
 
 Every schematic test's `setup` (see `minebot/testing/tests.py`) teleports
@@ -105,6 +108,38 @@ Fixed, short timeouts throughout (`TELEPORT_TIMEOUT_SECONDS`,
 explicit direction) -- a real short flat-ground or single-jump `!goto`
 should complete well under that; a test still running past it is more
 likely genuinely stuck than just slow.
+
+## Live navigate debugging
+
+`LegsNavigateNode`'s own `navigate[diag]` log line (self position, current
+waypoint, jump-related booleans, `runupTicks`) fires every 10th tick by
+default -- fine for eyeballing a normal walk, but too coarse to catch a
+real bug that only shows up across 2-3 consecutive ticks (e.g. a genuine
+double jump-key-press close enough together to trigger vanilla's own
+double-tap-space-toggles-flying detection -- confirmed live as the actual
+root cause of an intermittent `goto_leaves_2` failure that otherwise
+looked like a permanent physics wedge: the bot really was hovering,
+`deltaMovement.y == 0.0` and `LocalPlayer.getAbilities().flying == true`,
+not stuck against collision at all).
+
+Set `-Dminebot.debugNavigate=true` on the launched client's own JVM to
+switch `navigate[diag]` to EVERY tick and enable a second
+`navigate[collision]` line (real bounding box, `horizontalCollision`/
+`verticalCollision`, `deltaMovement`, `flying`) whenever the bot is
+walking toward a `requiresJump` waypoint. For the Gradle-launched client
+both this repo's own manual runs and the pytest integration driver use:
+
+```bash
+./gradlew runClient -Pminebot.debugNavigate=true
+```
+
+(same forwarding shape `build.gradle`'s `loom.runConfigs.client` already
+uses for `minebot.bootstrapTestWorld`/`minebot.controlPort` -- a bare
+Gradle `-P` project property never reaches the forked game process on its
+own). OFF by default -- deliberately not wired into
+`tests/integration/conftest.py`'s own `gradlew runClient` invocation,
+since every-tick logging is verbose enough to be a genuine cost on every
+routine test run; opt in only while actively chasing a live per-tick bug.
 
 ## Real vanilla jump physics: `JumpPhysics`
 

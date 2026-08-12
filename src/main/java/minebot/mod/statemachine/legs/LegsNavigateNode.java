@@ -80,6 +80,23 @@ import java.util.List;
  */
 public final class LegsNavigateNode implements StateNode<LegsState> {
     /**
+     * Per-tick navigate/collision diagnostic logging, OFF by default (the
+     * every-10th-tick navigate[diag] line below stays on regardless --
+     * this only controls the EVERY-tick variant, verbose enough to spam
+     * a real chase/long-walk log otherwise). Set via
+     * `-Dminebot.debugNavigate=true` on the mod's own JVM (or the
+     * launched-client Gradle run task, e.g.
+     * `./gradlew runClient -Pminebot.jvmArgs=-Dminebot.debugNavigate=true`
+     * for the pytest-launched client) when chasing a real per-tick
+     * movement bug live -- see TESTING.md's own "Live navigate debugging"
+     * section for the exact live investigation (a creative-flight
+     * double-jump trigger, goto_leaves_2) this flag was added for, and
+     * why every-10th-tick sampling wasn't fine-grained enough to catch a
+     * real double-tap happening across just 2-3 real ticks.
+     */
+    private static final boolean DEBUG_NAVIGATE = Boolean.getBoolean("minebot.debugNavigate");
+
+    /**
      * The next unreached waypoint's raw block position, or null when
      * there's no real planned waypoint (no path found/needed -- walking
      * straight at the raw target) or this node isn't active at all.
@@ -212,6 +229,31 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
      */
     static final BlackboardKey<JumpPhysics.Plan> JUMP_PLAN = new BlackboardKey<>("JUMP_PLAN");
 
+    /**
+     * The waypoint (by its own real block position) SPRINT_RUNUP_TICKS'
+     * current count was actually built while approaching -- NOT reset on
+     * every waypoint change by itself; only used to detect one. Confirmed
+     * live as a real bug (goto_leaves_2's own double-jump-triggers-
+     * creative-flight failure): SPRINT_RUNUP_TICKS previously accumulated
+     * across an ENTIRE walk, including plain (requiresJump=false) steps
+     * that happen to come immediately before a real jump waypoint in the
+     * same planned path. A long flat run-up toward an ordinary step (say,
+     * runupTicks=7) left that same stale count sitting in the blackboard
+     * the instant PathTracker.nextWaypoint advanced to the NEXT waypoint
+     * (a real requiresJump move) -- hasRunup's own runupTicks>=
+     * jumpPlan.runupTicks() check then read the OLD waypoint's run-up
+     * count against the NEW waypoint's plan, and worse, jumpPlan itself
+     * was still null (never frozen for this new waypoint, since freezing
+     * only happens the tick runupTicks flips 0->1, which never happened
+     * here), which hasRunup's own `jumpPlan == null` clause treats as
+     * "no plan needed, already ready" -- firing a genuine jump with ZERO
+     * real approach distance, one full waypoint too early. That premature
+     * jump, followed moments later by the real jump once the bot actually
+     * reached the true edge, is two real jump-key presses close enough
+     * together to read as vanilla's own double-tap-space flight toggle.
+     */
+    static final BlackboardKey<BlockPos> RUNUP_WAYPOINT = new BlackboardKey<>("RUNUP_WAYPOINT");
+
     // How close (real horizontal distance, not PathTracker.nextWaypoint's
     // own coarser floor()-based block match) counts as "already at this
     // jump waypoint" -- see requiresJumpSafeToFire's own docstring for
@@ -289,8 +331,21 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         double targetX = targetPosition.x();
         double targetY = targetPosition.y();
         double targetZ = targetPosition.z();
+        // Read exactly ONCE and reused for every onGround-gated decision
+        // below (buildingRunup, wantsToJump, the trailing diagnostic log)
+        // -- confirmed live as a real bug: separate ctx.player.onGround()
+        // calls scattered through this same method observed DIFFERENT
+        // values within what should be one consistent tick's worth of
+        // decision-making (buildingRunup's own onGround() read false while
+        // the trailing diagnostic's separate onGround() read true moments
+        // later in the exact same call), permanently starving
+        // buildingRunup/runupTicks of ever incrementing even though every
+        // other input it depends on (walking, facingWaypoint,
+        // intent.forward) was already true -- the bot stood still forever,
+        // never building the run-up a requiresJump move needs to ever fire.
+        boolean onGround = ctx.player.onGround();
 
-        ctx.pathTracker.maybeReplan(ctx.level, ctx.player, selfX, selfY, selfZ, targetX, targetY, targetZ, stopDistanceValue, avoidLiquid, ctx.player.onGround());
+        ctx.pathTracker.maybeReplan(ctx.level, ctx.player, selfX, selfY, selfZ, targetX, targetY, targetZ, stopDistanceValue, avoidLiquid, onGround);
 
         if (ctx.pathTracker.lastSearchFoundNoPath()) {
             // A real, completed search found no route at all -- stop
@@ -315,10 +370,24 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
             return;
         }
 
-        Move waypoint = ctx.pathTracker.nextWaypoint(ctx.level, selfX, selfY, selfZ, ctx.player.onGround());
+        Move waypoint = ctx.pathTracker.nextWaypoint(ctx.level, selfX, selfY, selfZ, onGround);
         ctx.blackboard.put(WAYPOINT_COORDINATES, waypoint != null ? new BlockPos(waypoint.x, waypoint.y, waypoint.z) : null);
         ctx.blackboard.put(WAYPOINT_TO_BREAK, waypoint != null ? waypoint.toBreak : Collections.emptyList());
         ctx.blackboard.put(WAYPOINT_DIG_STANCE, waypoint != null ? waypoint.digStance : null);
+
+        // Reset SPRINT_RUNUP_TICKS/JUMP_PLAN the instant the CURRENT
+        // waypoint changes -- see RUNUP_WAYPOINT's own docstring for the
+        // real double-jump-triggers-creative-flight bug this fixes: a
+        // run-up count built approaching one waypoint must never be
+        // reused/misread against a DIFFERENT one, whether that's a plain
+        // step's count leaking into the next requiresJump waypoint or
+        // vice versa.
+        BlockPos currentWaypointPos = waypoint != null ? new BlockPos(waypoint.x, waypoint.y, waypoint.z) : null;
+        if (!java.util.Objects.equals(ctx.blackboard.get(RUNUP_WAYPOINT), currentWaypointPos)) {
+            ctx.blackboard.put(SPRINT_RUNUP_TICKS, 0);
+            ctx.blackboard.put(JUMP_PLAN, null);
+            ctx.blackboard.put(RUNUP_WAYPOINT, currentWaypointPos);
+        }
 
         // Aim at the next unreached waypoint's block center, or the raw
         // target if we have no plan yet (the very first tick after a
@@ -448,7 +517,7 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         // whether it needs sprinting at all) that reaches -- but does not
         // overshoot past -- the target, using the same tick-by-tick
         // friction/accel model real vanilla movement uses.
-        boolean buildingRunup = walking && facingWaypoint && intent.forward && ctx.player.onGround();
+        boolean buildingRunup = walking && facingWaypoint && intent.forward && onGround;
         int previousRunupTicks = ctx.blackboard.get(SPRINT_RUNUP_TICKS) == null ? 0 : ctx.blackboard.get(SPRINT_RUNUP_TICKS);
         int runupTicks = buildingRunup ? previousRunupTicks + 1 : 0;
         ctx.blackboard.put(SPRINT_RUNUP_TICKS, runupTicks);
@@ -524,7 +593,7 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         // toggling creative flight on entirely by accident. A real jump
         // is a single discrete key-down on the ground, held or not; there
         // is nothing for a jump input to do once already airborne.
-        boolean wantsToJump = walking && ctx.player.onGround() && (dy > 0.1 || waypointRequiresJump) && !landingOnFarmland && requiresJumpSafeToFire;
+        boolean wantsToJump = walking && onGround && (dy > 0.1 || waypointRequiresJump) && !landingOnFarmland && requiresJumpSafeToFire;
         if (wantsToJump) {
             intent.jump = true;
         }
@@ -540,12 +609,21 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
             intent.sprint = true;
         }
 
-        if (walking && waypoint != null && ctx.player.tickCount % 10 == 0) {
+        if (walking && waypoint != null && (DEBUG_NAVIGATE || ctx.player.tickCount % 10 == 0)) {
             MinebotMod.LOGGER.info(
                 "navigate[diag]: self=({}, {}, {}) waypoint=({}, {}, {}) requiresJump={} dy={} relativeYawIntent=[fwd={} back={} left={} right={}] facingWaypoint={} runupTicks={} hasRunup={} jumpPlan={} jump={} onGround={}",
                 selfX, selfY, selfZ, waypoint.x, waypoint.y, waypoint.z, waypointRequiresJump, dy,
                 intent.forward, intent.backward, intent.left, intent.right, facingWaypoint,
-                runupTicks, hasRunup, jumpPlan, wantsToJump, ctx.player.onGround()
+                runupTicks, hasRunup, jumpPlan, wantsToJump, onGround
+            );
+        }
+        if (DEBUG_NAVIGATE && walking && waypoint != null && waypointRequiresJump) {
+            net.minecraft.world.phys.AABB box = ctx.player.getBoundingBox();
+            MinebotMod.LOGGER.info(
+                "navigate[collision]: box=[{},{},{}]-[{},{},{}] horizontalCollision={} verticalCollision={} deltaMovement={} flying={}",
+                box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
+                ctx.player.horizontalCollision, ctx.player.verticalCollision, ctx.player.getDeltaMovement(),
+                ctx.player.getAbilities().flying
             );
         }
         ctx.input.setIntent(intent);

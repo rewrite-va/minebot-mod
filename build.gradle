@@ -45,6 +45,16 @@ loom.runConfigs.client {
     if (project.hasProperty("minebot.controlPort")) {
         property("minebot.controlPort", project.property("minebot.controlPort").toString())
     }
+    // Enables LegsNavigateNode's own every-tick navigate/collision debug
+    // logging (normally sampled every 10th tick only -- see
+    // LegsNavigateNode.DEBUG_NAVIGATE's own docstring) when invoked as
+    // `./gradlew runClient -Pminebot.debugNavigate=true`. Same forwarding
+    // shape as bootstrapTestWorld/controlPort above -- a Gradle project
+    // property alone never reaches the forked game process; it has to be
+    // re-declared as a real system property here.
+    if (project.hasProperty("minebot.debugNavigate")) {
+        property("minebot.debugNavigate", project.property("minebot.debugNavigate").toString())
+    }
     // This machine has both an integrated AMD GPU and a discrete NVIDIA
     // RTX 4090 (confirmed via `nvidia-smi`, real, visible from WSL2 --
     // `/dev/dxg` present). WSLg's Mesa D3D12 Gallium driver defaulted to

@@ -114,6 +114,24 @@ public final class TestWorldBootstrap {
                 minecraft.screen
             );
             LOGGER.warn("minebot test-support: createFreshLevel returned -- world should now be loading/loaded");
+            // World-level GameType.CREATIVE above is still needed (the
+            // test harness's own /fill, /tp, and now /gamemode itself all
+            // need allowCommands -- operator command permission is a
+            // world-level setting, independent of any individual player's
+            // OWN gamemode), but the local player's gamemode is switched
+            // to survival right after they actually spawn -- confirmed
+            // live as the real root cause of an intermittent
+            // goto_leaves_2 failure that looked like a permanent physics
+            // wedge: two real jump-key presses close enough together
+            // (see LegsNavigateNode's own RUNUP_WAYPOINT docstring for why
+            // a second press could still slip through even after fixing
+            // the stale-run-up bug that caused the FIRST spurious one)
+            // read as vanilla's own double-tap-space-toggles-flying
+            // detection, which only exists in creative at all -- survival
+            // makes the whole failure mode structurally impossible instead
+            // of chasing every possible way two jumps could land close
+            // together.
+            ClientTickEvents.END_CLIENT_TICK.register(new GamemodeSwitcher());
         }
 
         /**
@@ -132,6 +150,32 @@ public final class TestWorldBootstrap {
                 .value()
                 .settings();
             return flatDimensions.replaceOverworldGenerator(registries, new FlatLevelSource(voidSettings));
+        }
+    }
+
+    /**
+     * One-shot (same `fired`-flag shape OneShotCreator's own docstring
+     * explains -- ClientTickEvents has no one-shot variant, so staying
+     * registered forever but no-op'ing after the first real fire is the
+     * only way): waits for the local player to actually exist (world
+     * creation/join is still async right after createFreshLevel returns --
+     * same reasoning MinebotMod's own onClientTick early-returns on a null
+     * player), then issues a real `/gamemode survival @s` exactly once.
+     * See the GamemodeSwitcher registration site's own comment for why
+     * survival, not creative, is what the test harness's OWN player
+     * should run as.
+     */
+    private static final class GamemodeSwitcher implements ClientTickEvents.EndTick {
+        private boolean fired;
+
+        @Override
+        public void onEndTick(final Minecraft minecraft) {
+            if (fired || minecraft.player == null) {
+                return;
+            }
+            fired = true;
+            LOGGER.warn("minebot test-support: switching local player to survival");
+            minecraft.player.connection.sendCommand("gamemode survival @s");
         }
     }
 }

@@ -494,6 +494,54 @@ public final class Movements {
         return (over / span) * JUMP_HEIGHT_PENALTY_MAX;
     }
 
+    // Real vanilla player hitbox width (Player.STANDING_DIMENSIONS,
+    // confirmed via decompiled source) -- half-width used to offset a
+    // block-centered position out to its own 4 real corners below.
+    private static final double PLAYER_HALF_WIDTH = 0.3;
+
+    /**
+     * True if the player's own real hitbox (a 0.6-wide square footprint,
+     * not a single block-grid cell) has clear headroom at EVERY ONE of
+     * its 4 corners, standing centered at block (cx, cz) with its head at
+     * world y=headY -- NOT just the single block cell (cx, headY, cz)
+     * itself. Confirmed live as a real bug (goto_leaves_2): a jump-up
+     * move's own headroom check only ever sampled the single block-grid
+     * column directly above the takeoff/landing cell, but the player's
+     * real body is wider than one block-grid line -- a leaf block sitting
+     * in a DIFFERENT block cell than either sampled column, close enough
+     * to graze the real hitbox's own edge, was invisible to a check that
+     * only ever asked "is the exact center column clear," and the bot
+     * physically clipped it mid-jump, got wedged against its real
+     * collision box, and hung there permanently (no more onGround to
+     * jump from, no jump input left to fire).
+     *
+     * At a perfectly block-centered position (cx+0.5, cz+0.5, the ONLY
+     * kind of position getMoveJumpUp/getMoveDiagonal ever plan a landing
+     * at), all 4 corners (offset +-0.3) still floor to the same single
+     * block cell -- 0.5+-0.3 stays within [0.2, 0.8], never crossing an
+     * integer boundary -- so this is a genuine no-op there; its real
+     * value is any caller checking a position that ISN'T already
+     * block-centered (e.g. a point partway along a jump's own real swept
+     * path, mid-arc between two block-aligned endpoints), where the 4
+     * corners genuinely can land in different block cells.
+     */
+    private boolean hasCornerClearance(final double centerX, final double centerZ, final int headY, final List<BlockPos> toBreak, final Move stance) {
+        double[] xs = {centerX - PLAYER_HALF_WIDTH, centerX + PLAYER_HALF_WIDTH};
+        double[] zs = {centerZ - PLAYER_HALF_WIDTH, centerZ + PLAYER_HALF_WIDTH};
+        for (double x : xs) {
+            for (double z : zs) {
+                int blockX = (int) Math.floor(x);
+                int blockZ = (int) Math.floor(z);
+                BlockInfo corner = getBlock(blockX, headY, blockZ, 0, 0, 0);
+                double cost = safeOrBreak(stance, corner, toBreak);
+                if (cost > BLOCKED) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     public Move getMoveForward(final Move node, final int dx, final int dz) {
         BlockInfo blockB = getBlock(node, dx, 1, dz);
         BlockInfo blockC = getBlock(node, dx, 0, dz);
@@ -550,6 +598,47 @@ public final class Movements {
         if (cost > BLOCKED) return null;
         cost += safeOrBreak(node, blockB, toBreak);
         if (cost > BLOCKED) return null;
+
+        // Corner-clearance check at the real MIDPOINT of the jump's own
+        // swept path (not just the takeoff/landing block-grid columns
+        // already checked above via blockA/blockH) -- confirmed live as
+        // the actual goto_leaves_2 bug: the bot's own real hitbox is
+        // wider than one block-grid column, and a leaf block sitting off
+        // to the SIDE of the straight-line path between takeoff and
+        // landing (in neither blockA's nor blockH's own column) still
+        // physically clipped the real jump arc mid-flight, wedging the
+        // bot permanently against its collision box. hasCornerClearance's
+        // own docstring explains why this is a no-op at the already
+        // block-centered takeoff/landing points themselves -- this
+        // midpoint is the one real position along the path that ISN'T
+        // block-centered, where the 4 real corners can actually land in
+        // different cells than a single center-column check would ever
+        // see.
+        // Height range: the real jump ARC's own feet position rises
+        // continuously from node.y toward node.y+1 across the flight, so
+        // the body's real head height at the midpoint sweeps somewhere
+        // between (node.y + 1.8) and (node.y + 1 + 1.8) depending on
+        // exactly where in the arc this midpoint lands -- confirmed live
+        // a single fixed height (tried node.y+2 first) missed the real
+        // leaf collision entirely: goto_leaves_2's own leaves sit at
+        // node.y+2 in SCHEMATIC coordinates but the bot's own real
+        // mid-arc head height at the moment it got wedged floored to
+        // node.y+2 as well by coincidence of THIS jump's own timing, yet
+        // still wedged, because the corner sample at that exact instant
+        // used the WRONG (x, z) -- the naive straight-line midpoint
+        // undershoots how far a real sprint-jump's horizontal drift
+        // actually carries the body relative to a linear x/z interpolation.
+        // Checking BOTH plausible head-height cells (node.y+1 and
+        // node.y+2) removes the height guess entirely, at the one real
+        // (x, z) position that matters.
+        double midX = node.x + 0.5 + dx * 0.5;
+        double midZ = node.z + 0.5 + dz * 0.5;
+        if (!hasCornerClearance(midX, midZ, node.y + 1, toBreak, node)) {
+            return null;
+        }
+        if (!hasCornerClearance(midX, midZ, node.y + 2, toBreak, node)) {
+            return null;
+        }
 
         return new Move(blockB.x, blockB.y, blockB.z, cost, toBreak, true, digStanceFor(node, toBreak));
     }
@@ -615,8 +704,40 @@ public final class Movements {
             cost += jumpHeightPenalty(stepHeight);
             cost += safeOrBreak(node, getBlock(node, 0, 2, 0), toBreak);
             if (cost > BLOCKED) return null;
+            // The body's own headroom at the TWO orthogonal corner columns
+            // the diagonal jump's real arc swings through mid-flight --
+            // (dx,2,0) and (0,2,dz), both at the CLIMBED height (y+1=2
+            // above the takeoff floor) -- not just the takeoff (0,2,0) and
+            // landing (dx,3,dz) columns already checked above/below.
+            // Confirmed live (goto_leaves_2): a diagonal step-up move with
+            // leaves overhanging exactly one of these corner columns (but
+            // neither the takeoff nor landing column) scored as fully
+            // clear, since neither existing headroom check ever looked
+            // here -- the bot's real jump arc physically clipped the
+            // leaves mid-diagonal even though both endpoints were clear.
+            cost += safeOrBreak(node, getBlock(node, dx, 2, 0), toBreak);
+            if (cost > BLOCKED) return null;
+            cost += safeOrBreak(node, getBlock(node, 0, 2, dz), toBreak);
+            if (cost > BLOCKED) return null;
             cost += 1.0;
-            return new Move(blockC.x, blockC.y + 1, blockC.z, cost, toBreak, false, digStanceFor(node, toBreak));
+            // requiresJump=true, NOT false -- confirmed live as a real bug
+            // (goto_leaves_2): vanilla's own auto-step-up assist is real
+            // but shallow (~0.6 blocks) and, more importantly, doesn't
+            // apply moving diagonally the way it does moving straight
+            // ahead -- getMoveForward's own plain requiresJump=false is
+            // correct there because a full block of MAX_STEP_HEIGHT
+            // headroom on a STRAIGHT approach really is auto-step
+            // territory, but this diagonal branch was using the exact
+            // same jumpHeightPenalty/MAX_STEP_HEIGHT budget as
+            // getMoveJumpUp's own real jump-up move (which DOES set
+            // requiresJump=true) while still claiming false here. Left
+            // false, LegsNavigateNode's own wantsToJump (gated on
+            // waypointRequiresJump || dy>0.1 while ON THE GROUND) never
+            // fired a jump input for this move; the bot instead walked
+            // off the lower ledge, went airborne with no jump queued, and
+            // hovered stuck at the gap forever since a mid-air bot has no
+            // ground left to jump FROM.
+            return new Move(blockC.x, blockC.y + 1, blockC.z, cost, toBreak, true, digStanceFor(node, toBreak));
         } else if (blockD.physical || blockC.liquid) {
             if (blockD.physical && blockD.dangerous) {
                 return null; // real floor, but standing on it (magma block) hurts -- see getLandingBlock's own dangerous check
