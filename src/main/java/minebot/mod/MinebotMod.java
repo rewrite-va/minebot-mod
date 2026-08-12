@@ -507,6 +507,68 @@ public final class MinebotMod implements ClientModInitializer {
                 String arg = json.has("arg") ? json.get("arg").getAsString() : null;
                 handleQuery(arg, json);
             }
+            case "teleport" -> {
+                // Structured teleport, NOT a raw "/tp ..." string sent via
+                // the "chat" case below -- exists to also (1) zero the
+                // player's own residual velocity/fall distance right after
+                // the /tp lands, and (2) reset yaw/pitch to a fixed,
+                // known facing (0, 0) -- neither of which a plain "/tp x y
+                // z" (no rotation args) ever does on its own: vanilla's own
+                // /tp with a bare position overwrites position ONLY,
+                // preserving both existing delta-movement AND existing
+                // facing direction. Confirmed live as two stacked real
+                // bugs, both only visible when goto_jump_1 ran immediately
+                // after goto_impossible left the bot mid-fall/mid-NO_PATH
+                // fighting an unreachable target at some arbitrary yaw:
+                // JumpPhysics' run-up/sprint choice (see its own docstring)
+                // is derived from real per-tick velocity integration AND
+                // the bot's own facing direction, so BOTH leftover fall
+                // velocity and leftover yaw surviving a same-tick /tp
+                // silently skewed the very next jump's own trajectory
+                // (confirmed by two bit-for-bit-identical failing traces
+                // that only differed in starting yaw from a passing,
+                // isolated run), missing the path waypoint by a small but
+                // real margin despite landing safely across the gap. Safe
+                // to reset synchronously right after sendChat here
+                // specifically because this only ever targets the local
+                // single-player integrated server this test suite runs
+                // against -- the command executes same-tick, not over real
+                // network latency the way a dedicated remote server
+                // command would.
+                if (json.has("x") && json.has("y") && json.has("z")) {
+                    double x = json.get("x").getAsDouble();
+                    double y = json.get("y").getAsDouble();
+                    double z = json.get("z").getAsDouble();
+                    sendChat("/tp @s " + x + " " + y + " " + z);
+                    LocalPlayer player = Minecraft.getInstance().player;
+                    if (player != null) {
+                        player.setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
+                        player.fallDistance = 0.0f;
+                        // Also reset facing to a fixed, known yaw/pitch --
+                        // NOT via a `/tp ... 0 0` rotation suffix on the
+                        // command itself (tried first; confirmed live as
+                        // its own real bug: passing explicit rotation args
+                        // to /tp made the client's own yaw runaway/spin to
+                        // huge accumulating values every tick afterward,
+                        // e.g. 5761 -> 9428 -> 20952 -> 31427, instead of
+                        // staying at the requested 0 -- looks like a
+                        // client-side prediction desync between the
+                        // server's forced absolute rotation and whatever
+                        // turn-input state the client still had queued,
+                        // not something safe to leave in place). Setting
+                        // yaw/pitch directly on the LocalPlayer object here
+                        // instead avoids the server round-trip / rotation-
+                        // command path entirely -- same reasoning as the
+                        // velocity/fall-distance reset just above.
+                        player.setYRot(0.0f);
+                        player.setXRot(0.0f);
+                        player.yRotO = 0.0f;
+                        player.xRotO = 0.0f;
+                        player.setYHeadRot(0.0f);
+                        player.setYBodyRot(0.0f);
+                    }
+                }
+            }
             case "chat" -> {
                 // Re-added -- was one of the commands stripped down to
                 // nothing during the peer-state-machine rewrite (see this
