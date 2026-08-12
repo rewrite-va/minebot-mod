@@ -107,7 +107,11 @@ Fixed, short timeouts throughout (`TELEPORT_TIMEOUT_SECONDS`,
 `GOTO_TIMEOUT_SECONDS`, `SCHEMATIC_TIMEOUT_SECONDS` = 5.0s each, per
 explicit direction) -- a real short flat-ground or single-jump `!goto`
 should complete well under that; a test still running past it is more
-likely genuinely stuck than just slow.
+likely genuinely stuck than just slow. `goto_leaves_2` is the one
+exception (`LEAVES2_GOTO_TIMEOUT_SECONDS` = 15.0s) -- its own start
+position sits in an open pit with no floor block under it at all, so a
+real route out involves more ticks of fall/recovery/climb than a normal
+flat-ground or single-gap-jump course before ever reaching `end`.
 
 ## Live navigate debugging
 
@@ -276,6 +280,64 @@ at catching:
   guidance. Motivated adding `!query position` as an on-demand check
   distinct from the passive broadcast tracker (per explicit direction:
   no forced periodic heartbeat broadcast -- an on-demand query instead).
+- **`Movements.getMoveDiagonal`'s own "stepping up while moving
+  diagonally" branch hardcoded `requiresJump=false`**, despite using the
+  exact same `MAX_STEP_HEIGHT`/`jumpHeightPenalty` budget
+  `getMoveJumpUp`'s real jump-up move does (which correctly sets `true`).
+  Vanilla's real auto-step-up assist is shallow (~0.6 blocks) and doesn't
+  apply moving diagonally the way it does moving straight ahead, so
+  `LegsNavigateNode` never fired a jump input for these moves at all --
+  the bot just walked off the edge into open air. Also missing: headroom
+  checks at the two orthogonal corner columns a diagonal jump's real arc
+  swings through mid-flight (only the takeoff/landing columns were ever
+  checked), which could plan a diagonal move through an obstruction
+  neither endpoint's own column ever touched.
+- **`ctx.player.onGround()` was called separately at several different
+  points within the same `LegsNavigateNode.walkTowardNavTarget` tick**,
+  and observed live to return DIFFERENT values across those calls within
+  what should have been one consistent tick's worth of decision-making --
+  `buildingRunup`'s own read came back `false` while a later read in the
+  same tick's own diagnostic log came back `true`. This permanently
+  starved `runupTicks` from ever incrementing past 0 even though every
+  other input `buildingRunup` depends on was already satisfied, so the
+  bot stood still forever, never building the run-up a `requiresJump`
+  move needs before it can fire. Fixed by reading `onGround()` exactly
+  once per tick and reusing that single value everywhere.
+- **`SPRINT_RUNUP_TICKS`/`JUMP_PLAN` leaked across waypoint changes.**
+  Both were only ever reset on node entry/exit, never when
+  `PathTracker.nextWaypoint` actually advances to a different waypoint
+  mid-walk -- a long flat run-up built approaching an ordinary
+  (`requiresJump=false`) step immediately before a real jump waypoint in
+  the same planned path left its own stale tick count (and a stale/null
+  `JUMP_PLAN`) sitting in the blackboard the instant the waypoint
+  changed. `hasRunup`'s own `jumpPlan == null` fallback (meant for "no
+  jump needed, always ready") then wrongly read "no frozen plan yet" as
+  "already have enough run-up," firing a real jump with ZERO actual
+  approach distance, one full waypoint too early -- followed moments
+  later by the real jump once the bot genuinely reached the true edge.
+  Two real jump-key presses close enough together is itself vanilla's
+  own double-tap-space-toggles-flying trigger (see the next entry).
+  Fixed via a new `RUNUP_WAYPOINT` blackboard key that resets both
+  `SPRINT_RUNUP_TICKS` and `JUMP_PLAN` the instant the current waypoint
+  changes.
+- **The bootstrapped test world ran in CREATIVE, so any double jump-key
+  press -- however it happens -- silently toggles flight instead of
+  failing loudly.** Even after fixing the specific double-jump trigger
+  above, a real jump sequence can still legitimately press jump twice in
+  quick succession in other scenarios (retried jumps, replans, ...);
+  creative made every one of those a potential flight-toggle instead of
+  a harmless no-op. A `goto_leaves_2` failure that looked like a
+  permanent physics wedge (bot frozen mid-air, never moving again) was
+  actually the bot flying: confirmed live via the `-Dminebot.debugNavigate`
+  flag's own `navigate[collision]` line -- `deltaMovement.y == 0.0`
+  (zero gravity) and `LocalPlayer.getAbilities().flying == true` from the
+  moment collision logging started. Fixed at the root: `TestWorldBootstrap`
+  now switches the local player to survival right after they spawn
+  (`/gamemode survival @s`), while keeping the WORLD's own
+  `allowCommands` on for `/fill`/`/tp` (operator command permission is
+  independent of any individual player's own gamemode) -- makes the
+  whole failure mode structurally impossible instead of chasing every
+  possible way two jumps could land close together.
 
 ## Open questions / not yet decided
 
