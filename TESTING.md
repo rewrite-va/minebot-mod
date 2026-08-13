@@ -355,6 +355,29 @@ at catching:
   toggle failure mode structurally impossible for a test run without
   permanently changing whatever gamemode a human was actually using the
   session for.
+- **`on_ground` rides along on ordinary position broadcasts, flickering
+  independently of any real jump.** `MinebotMod.maybeBroadcastPositionEvent`
+  dedups broadcasts against a `PositionSnapshot` of `(x, y, z, yaw,
+  pitch)` only -- `on_ground` is deliberately excluded, per that method's
+  own comment, on the assumption that no Python code read it and
+  including it would spam a broadcast every time it flipped independent
+  of movement (e.g. brief ground-contact flicker while standing still on
+  stairs/slabs). That assumption held until minebot's own
+  `count_jumps`/`assert_jumps_done` (added for `goto_leaves_1`/
+  `goto_leaves_2`) started trusting every `on_ground` transition in the
+  broadcast stream as a real liftoff/land cycle. Since real movement
+  changes x/y/z on nearly every tick anyway, `on_ground` still rides
+  along on nearly every broadcast during a walk, and vanilla's own known
+  ground-contact flicker at a block edge or on landing produces spurious
+  `true`/`false` toggles with no real height change at all -- confirmed
+  live: `goto_leaves_2` reported 3 jumps for a run where the mod's own
+  `navigate[diag]` log showed `jump=true` exactly once. Fixed Python-side
+  (`minebot/testing/actions.py::count_jumps`), not mod-side: requires a
+  minimum real height gain (`JUMP_MIN_HEIGHT_GAIN`, 0.1 blocks) above the
+  liftoff `y` before counting an airborne on_ground excursion as a jump,
+  comfortably below `BASE_JUMP_POWER`'s (0.42) real liftoff height so
+  every genuine jump still counts, while filtering ground noise that
+  never leaves the floor.
 
 ## Gamemode command/query
 
