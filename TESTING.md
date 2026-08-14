@@ -11,7 +11,7 @@ tier was even feasible.
 ## Two entry points, one shared test body
 
 The actual test logic (place a schematic, send `!goto`, assert on the
-bot's real broadcast state) lives once, in the `minebot` repo under
+bot's real broadcast state) lives once, in the `minebot-backend` repo under
 `minebot/testing/tests.py`, as plain async functions registered into a
 `TestRegistry`. There are two ways to run them:
 
