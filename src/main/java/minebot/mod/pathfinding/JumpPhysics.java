@@ -55,6 +55,14 @@ package minebot.mod.pathfinding;
  *   was closer to this velocity-convergence effect than the attribute
  *   itself, but SPRINT_RUNUP_TICKS existed to capture exactly this
  *   convergence, not a modifier delay.
+ * - LivingEntity.jumpFromGround has its own separate sprint-only term on
+ *   top of all the above: when isSprinting() at the moment of liftoff, it
+ *   adds a flat 0.2-block/tick horizontal impulse in the facing direction
+ *   (addDeltaMovement((-sin(yaw)*0.2, 0, cos(yaw)*0.2))) -- a one-time
+ *   liftoff kick, not part of the ground run-up accel loop. Missing this
+ *   term made earlier versions of this model require far more run-up than
+ *   real sprint-jumping needs (see SPRINT_JUMP_LIFTOFF_BOOST's own
+ *   comment for the live goto_jump_4 case this was confirmed against).
  */
 public final class JumpPhysics {
     public static final float BASE_JUMP_POWER = 0.42F;
@@ -63,8 +71,46 @@ public final class JumpPhysics {
     private static final float SPRINT_SPEED = 0.13F;
     private static final double GROUND_FRICTION_DECAY = 0.6 * 0.91; // default block friction
     private static final double AIR_FRICTION_DECAY = 1.0 * 0.91;
-    private static final double AIR_ACCEL = 0.02;
+    // Player.getFlyingSpeed overrides LivingEntity's flat 0.02 constant --
+    // while NOT actually flying (the normal on-foot case), it returns
+    // 0.026 instead of 0.02 whenever isSprinting() is true, a airborne-
+    // accel detail LivingEntity's own javadoc/base implementation doesn't
+    // have at all (only Player's override does). Missing this (along with
+    // SPRINT_JUMP_LIFTOFF_BOOST below) made the model under-predict how
+    // far a real sprint jump travels -- confirmed live on goto_jump_4: a
+    // plan built with sprint@5 ticks was simulated to land at 4.32 blocks
+    // (just barely short of the needed ~4.34), but the bot's real landing
+    // came up well shorter than even that in practice, consistent with
+    // this term being missing entirely rather than just a rounding gap.
+    private static final double AIR_ACCEL_WALK = 0.02;
+    private static final double AIR_ACCEL_SPRINT = 0.026;
     private static final int MAX_AIR_TICKS = 60; // generous cap -- real jumps land well before this
+    // LivingEntity.jumpFromGround's own sprint branch adds this as a flat
+    // horizontal liftoff impulse (addDeltaMovement, facing-direction
+    // unit vector * 0.2) the instant a sprinting jump leaves the ground --
+    // separate from, and on top of, the ground run-up accel simulated
+    // above. Missing this made the model systematically require far more
+    // run-up than real play needs for sprint jumps specifically (confirmed
+    // live: goto_jump_4's 3-wide gap, easily cleared running with only a
+    // couple of blocks of run-up, was computed as needing 7 sprint ticks
+    // without this term -- the bot then undershot into the gap on a
+    // shorter real platform).
+    private static final double SPRINT_JUMP_LIFTOFF_BOOST = 0.2;
+    // Real vanilla player hitbox is 0.6 blocks wide -- 0.3 blocks from
+    // center to the LEADING face in the direction of travel. Confirmed
+    // live via a real navigate[collision] AABB trace on goto_jump_4:
+    // box=[0.2,5.4]-[0.8,6.0] at the tick horizontalCollision first fired,
+    // i.e. the leading face (z=6.0) hit the landing block's own wall a
+    // full 0.3 blocks before the player's own CENTER (aimed at the
+    // waypoint's block center, one more 0.5 beyond the wall) would have.
+    // The height-at-target check below must ask "is the bot still above
+    // ledge height by the time its LEADING FACE reaches the wall", not
+    // "...by the time its distant-in-comparison CENTER reaches the far
+    // waypoint's own center" -- checking the wrong (later, further) point
+    // let the first version of this height check pass every candidate
+    // with no effect at all, since by the waypoint's own center the arc
+    // had always already fallen well below ledge height regardless.
+    private static final double PLAYER_HALF_WIDTH = 0.3;
 
     private JumpPhysics() {
     }
@@ -74,17 +120,45 @@ public final class JumpPhysics {
     }
 
     /**
+     * One full simulated jump arc's outcome: `landingDistance` is the
+     * horizontal distance traveled once vertical position returns to (at
+     * or below) takeoff height -- a level landing, matching this mod's
+     * jump moves, which only ever connect two standing surfaces of the
+     * same reachable height (see Movements' own MAX_STEP_HEIGHT-gated
+     * move generation; a jump onto a DIFFERENT height is a different,
+     * taller/shorter arc this simple level-landing model doesn't cover).
+     * `heightAtTargetDistance` is the real per-tick height (see
+     * simulateArc's own docstring for why this is a SEPARATE field from
+     * landingDistance, not derivable from it) at the first tick horizontal
+     * position reaches whatever target distance the caller asked about --
+     * NaN if the arc never reaches that far at all within MAX_AIR_TICKS.
+     */
+    private record Arc(double landingDistance, double heightAtTargetDistance) {
+    }
+
+    /**
      * Simulates a single run-up-then-jump attempt: `runupTicks` ticks of
      * ground accel (sprinting or not), then a liftoff at BASE_JUMP_POWER,
-     * tracking horizontal distance traveled until vertical position
-     * returns to (at or below) the takeoff height -- a level landing,
-     * matching this mod's jump moves, which only ever connect two
-     * standing surfaces of the same reachable height (see Movements'
-     * own MAX_STEP_HEIGHT-gated move generation; a jump onto a
-     * DIFFERENT height is a different, taller/shorter arc this simple
-     * level-landing model doesn't cover).
+     * tracking BOTH horizontal distance and real height every tick --
+     * unlike an earlier version of this method that only ever tracked
+     * distance at the moment of a level landing, that alone can't tell
+     * "clears the gap" from "arrives at the right total DISTANCE only
+     * after already falling below the landing ledge's own height and
+     * slamming into its wall face instead." Confirmed live via a real
+     * `navigate[collision]` trace on goto_jump_4: a plan whose landing
+     * DISTANCE was more than sufficient (a level-landing arc reaching
+     * well past the target) still failed for real, because by the tick
+     * horizontal position actually reached the target's own x/z, the
+     * bot's height had already dropped below the landing platform's own
+     * top surface -- `horizontalCollision=true` against the platform's
+     * SIDE, deltaMovement.z snapped to 0.0, exactly like a real player
+     * jumping a hair too low and short and bonking into a ledge instead
+     * of landing on it. A same-height "total distance at re-landing"
+     * check can never see this, since it only asks "how far does this
+     * arc go in total", never "is the arc still above ledge height at
+     * the specific point it needs to be."
      */
-    static double simulateLevelLanding(final int runupTicks, final boolean sprint) {
+    static Arc simulateArc(final int runupTicks, final boolean sprint, final double ledgeEdgeDistance) {
         double v = 0.0;
         double pos = 0.0;
         double accel = sprint ? SPRINT_SPEED : WALK_SPEED;
@@ -96,18 +170,34 @@ public final class JumpPhysics {
         double vy = BASE_JUMP_POWER;
         double y = 0.0;
         double prevY;
+        double prevPos = pos;
+        double heightAtTarget = Double.NaN;
+        if (sprint) {
+            v += SPRINT_JUMP_LIFTOFF_BOOST;
+        }
+        double airAccel = sprint ? AIR_ACCEL_SPRINT : AIR_ACCEL_WALK;
         for (int t = 0; t < MAX_AIR_TICKS; t++) {
-            v += AIR_ACCEL;
+            v += airAccel;
+            prevPos = pos;
             pos += v;
             v *= AIR_FRICTION_DECAY;
             vy -= GRAVITY_PER_TICK;
             prevY = y;
             y += vy;
+            if (Double.isNaN(heightAtTarget) && pos >= ledgeEdgeDistance && prevPos < ledgeEdgeDistance) {
+                // Linearly interpolate height at the exact tick horizontal
+                // position crosses the ledge edge -- close enough for
+                // planning purposes (a single tick's worth of extra
+                // vertical fall, ~0.02-0.08 blocks at this point in the
+                // arc, is well inside this model's other approximations).
+                double frac = (ledgeEdgeDistance - prevPos) / (pos - prevPos);
+                heightAtTarget = prevY + (y - prevY) * frac;
+            }
             if (t > 0 && prevY > 0.0 && y <= 0.0) {
-                return pos;
+                return new Arc(pos, heightAtTarget);
             }
         }
-        return pos; // never came back down within MAX_AIR_TICKS -- return whatever distance was reached
+        return new Arc(pos, heightAtTarget); // never came back down within MAX_AIR_TICKS
     }
 
     // How much closer a candidate's landing distance has to be to prefer
@@ -157,14 +247,51 @@ public final class JumpPhysics {
      * to get right than just searching the same simulate() this class
      * already trusts.
      */
+    // Minimum height (relative to takeoff/landing height, 0.0) the arc
+    // must still be at by the tick it reaches the target distance -- see
+    // Arc.heightAtTargetDistance's own docstring for the real
+    // wall-collision bug this guards against. A small positive margin
+    // (not exactly 0.0): simulateArc's own height-at-target is a single
+    // linear interpolation between two real tick samples, not a
+    // continuous curve, and real vanilla collision resolution against a
+    // ledge's exact corner has its own small margins this simple model
+    // can't capture exactly -- landing with SOME real clearance above the
+    // ledge top, not just barely grazing it, is what a real player
+    // running the same jump would experience too.
+    private static final double MIN_HEIGHT_AT_TARGET = 0.1;
+
     public static Plan planRunup(final double horizontalDistance) {
+        // horizontalDistance (the caller's own aim-point distance, always
+        // measured to the TARGET BLOCK'S OWN CENTER, x+0.5/z+0.5 -- see
+        // LegsNavigateNode's own aimX/aimZ) is 0.5 blocks further than the
+        // landing block's own NEAR edge -- the wall a too-low arc actually
+        // collides with, well before ever reaching the center. The
+        // player's own leading hitbox face reaches that same wall
+        // PLAYER_HALF_WIDTH blocks earlier still (see its own comment).
+        // The height check below must fire at THIS distance, not the
+        // full horizontalDistance -- see simulateArc's own docstring for
+        // the live goto_jump_4 bug from checking at the wrong (too far)
+        // point.
+        double ledgeEdgeDistance = horizontalDistance - 0.5 - PLAYER_HALF_WIDTH;
         Plan best = null;
         for (boolean sprint : new boolean[]{false, true}) {
             for (int runup = 0; runup <= 20; runup++) {
-                double landing = simulateLevelLanding(runup, sprint);
-                if (landing < horizontalDistance) {
+                Arc arc = simulateArc(runup, sprint, ledgeEdgeDistance);
+                if (arc.landingDistance() < horizontalDistance) {
                     continue; // undershoots -- never falls short of the target on purpose
                 }
+                if (Double.isNaN(arc.heightAtTargetDistance()) || arc.heightAtTargetDistance() < MIN_HEIGHT_AT_TARGET) {
+                    // Reaches the target DISTANCE eventually, but has
+                    // already dropped below the landing ledge's own
+                    // height by the tick it gets there -- a real
+                    // horizontalCollision into the ledge's side face, not
+                    // a clean landing on top of it (see Arc's own
+                    // docstring for the live goto_jump_4 trace that
+                    // exposed this). Not a viable candidate no matter how
+                    // good its total landing distance looks.
+                    continue;
+                }
+                double landing = arc.landingDistance();
                 if (best == null) {
                     best = new Plan(runup, sprint, landing);
                     continue;
@@ -179,14 +306,15 @@ public final class JumpPhysics {
         }
         if (best == null) {
             // No walk/sprint/runup combination within the search range clears this
-            // distance at all (a genuinely too-far jump) -- fall back to the
+            // distance (and stays above ledge height doing it) at all (a
+            // genuinely too-far or too-flat jump) -- fall back to the
             // longest-reaching option found (max runup, sprinting) rather than
             // returning null, since Movements' own move-generation is the real
             // gate on whether this distance should have been offered as a move
             // in the first place (see MAX_STEP_HEIGHT/jump-height reasoning
             // there); this is a last-resort "do your best" rather than a second
             // reachability check duplicating that one.
-            best = new Plan(20, true, simulateLevelLanding(20, true));
+            best = new Plan(20, true, simulateArc(20, true, ledgeEdgeDistance).landingDistance());
         }
         return best;
     }

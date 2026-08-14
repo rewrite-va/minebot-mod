@@ -120,6 +120,14 @@ flat-ground or single-gap-jump course before ever reaching `end`.
 
 ## Live navigate debugging
 
+**Set `-Dminebot.debugNavigate=true` on the client by default while
+actively working on movement/pathfinding**, not just after a failure
+prompts going back to reproduce it with logging on -- per explicit
+direction, to avoid the back-and-forth of "reproduce the failure, THEN
+relaunch with debug flags on, THEN reproduce it again" every single time
+a jump/navigate bug needs diagnosing. Only turn it off again once done
+(see its own verbosity note below for why it's not just left on always).
+
 `LegsNavigateNode`'s own `navigate[diag]` log line (self position, current
 waypoint, jump-related booleans, `runupTicks`) fires every 10th tick by
 default -- fine for eyeballing a normal walk, but too coarse to catch a
@@ -129,7 +137,14 @@ double-tap-space-toggles-flying detection -- confirmed live as the actual
 root cause of an intermittent `goto_leaves_2` failure that otherwise
 looked like a permanent physics wedge: the bot really was hovering,
 `deltaMovement.y == 0.0` and `LocalPlayer.getAbilities().flying == true`,
-not stuck against collision at all).
+not stuck against collision at all). Separately, the same method also
+logs `navigate[diag]` on EVERY tick (regardless of this flag) whenever
+`approachingJump` is true -- i.e. while a real jump waypoint is imminent,
+including the plain edge waypoint immediately before it (see
+`LegsNavigateNode`'s own `jumpWaypoint` look-ahead comment) -- since that
+handful of ticks right around a jump is where run-up/edge-timing bugs
+actually live, and logging them unconditionally is cheap (it's a tiny
+fraction of a normal walk's total ticks).
 
 Set `-Dminebot.debugNavigate=true` on the launched client's own JVM to
 switch `navigate[diag]` to EVERY tick and enable a second
@@ -406,3 +421,89 @@ to either `conftest.py` or `TestRunner` specifically.
   unattended in CI, only locally.
 - Broader test suite scope beyond movement/pathfinding (bow-drawing,
   block breaking, door opening, item pickup) -- not started.
+
+## Handoff: `goto_jump_4` still fails (jump-arc physics incomplete)
+
+`goto_jump_4` (an 8-block course, required path checkpoint at z=4, a real
+3-block gap z=3-5 -- see its own registration comment in
+`minebot/testing/tests.py`) still fails as of this writing: the bot
+reliably collides with the landing platform's own wall face (real
+`horizontalCollision=true`, confirmed via a `navigate[collision]` AABB
+trace) instead of clearing onto it, at the same position every run.
+
+### Fixes landed this session (keep these -- each independently confirmed
+correct against decompiled vanilla source and/or a real collision trace,
+regardless of whether the remaining bug below ever gets fixed)
+
+1. **Sprint-jump liftoff boost** (`JumpPhysics.SPRINT_JUMP_LIFTOFF_BOOST
+   = 0.2`) -- `LivingEntity.jumpFromGround`'s own sprint branch adds a
+   flat 0.2 horizontal impulse the instant a sprinting jump leaves the
+   ground (`addDeltaMovement`, facing-direction unit vector * 0.2). The
+   model had no term for this at all before, so it systematically
+   demanded far more run-up than real sprint-jumping needs.
+2. **Sprint airborne acceleration** (`JumpPhysics.AIR_ACCEL_SPRINT =
+   0.026`, vs `AIR_ACCEL_WALK = 0.02`) -- `Player.getFlyingSpeed()`
+   overrides `LivingEntity`'s flat `0.02` airborne-accel constant with
+   `0.026` whenever `isSprinting()` is true (NOT flying -- see its own
+   `abilities.flying` branch, unrelated). The model previously used
+   `0.02` unconditionally.
+3. **Jump-waypoint look-ahead** (`LegsNavigateNode`'s `jumpWaypoint`) --
+   run-up now starts building while still approaching the PLAIN waypoint
+   immediately before a real `requiresJump` waypoint, instead of only
+   after `PathTracker.nextWaypoint` has already advanced onto the jump
+   waypoint itself -- which, for a waypoint sitting flush on a
+   platform's own edge, was always too late to build any run-up at all.
+4. **Live (not frozen-too-early) run-up plan distance** -- `JUMP_PLAN` is
+   now (re)computed against the bot's REAL position at the tick it's
+   actually about to fire (`atLastSafeTick`), not a stale distance
+   measured whenever run-up first started building several ticks (and
+   several blocks of further walking) earlier.
+5. **Ledge-edge height check** (`JumpPhysics.simulateArc`,
+   `MIN_HEIGHT_AT_TARGET`, `PLAYER_HALF_WIDTH`) -- a genuinely new
+   concept the model had no equivalent of before: reject a run-up plan
+   that eventually reaches the target horizontal DISTANCE but has
+   already fallen below the landing ledge's own height by the tick the
+   player's own leading hitbox face (0.3 blocks ahead of center) reaches
+   the ledge's wall -- exactly the real `horizontalCollision` failure
+   mode this whole investigation is chasing, which a same-height
+   "total distance at re-landing" check can never see on its own.
+
+### What's still wrong
+
+Even with all five fixes above, `goto_jump_4` collides with the landing
+wall at the same spot every time. Real per-tick horizontal position
+(pulled from `navigate[diag]`/`navigate[collision]`'s own broadcast log
+during a run) advances at a near-constant **~0.29 blocks/tick** through
+the jump arc. `JumpPhysics.simulateArc` predicts a rising-then-falling
+curve instead, peaking around **~0.37 blocks/tick** early in the arc and
+decaying from there (`AIR_FRICTION_DECAY = 1.0 * 0.91` per tick). Real
+flight is measurably slower/flatter than the model -- the model's own
+landing-distance number ends up close to correct in some cases (by
+coincidence of where the curve happens to average out) while the
+TIMING of when the bot reaches a given horizontal distance is wrong,
+which is exactly what the ledge-height check (fix 5) depends on being
+right and currently isn't.
+
+This means the remaining bug is in the AIRBORNE velocity/friction model
+itself -- not a missing term the way fixes 1-2 were, but the existing
+`AIR_FRICTION_DECAY` constant (or how ground run-up velocity carries over
+into the airborne phase at the moment of liftoff) being measurably wrong
+against real per-tick behavior.
+
+**Concrete next step, not yet done:** add real per-tick
+`ctx.player.getDeltaMovement()` (both `.x`/`.z`, not just position) to
+the `navigate[diag]`/`navigate[collision]` log during a jump arc, and
+diff that tick-by-tick against `simulateArc`'s own internal `v` value at
+the matching tick -- direct velocity-vs-velocity comparison, rather than
+inferring velocity from position deltas the way this session's
+diagnosis had to (position deltas conflate velocity AND however many
+real ticks actually elapsed between two logged broadcasts, which this
+session never independently confirmed against `ctx.player.tickCount`).
+
+The mod jar currently deployed to the `ritebot` Prism instance has fix 5
+applied but is still the failing build (`goto_jump_4` fails both via
+`!runtest` against a real client and via `uv run pytest
+tests/integration/test_goto_jump_4.py`). All five fixes above are left
+in the working tree uncommitted, on top of the jump-waypoint look-ahead
+and unconditional `approachingJump` diagnostic logging also added this
+session (see "Live navigate debugging" above).
