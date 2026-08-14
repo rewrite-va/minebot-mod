@@ -68,6 +68,12 @@ import java.util.Set;
 public final class MinebotMod implements ClientModInitializer {
     public static final Logger LOGGER = LoggerFactory.getLogger("minebot-mod");
 
+    // Independent of LegsNavigateNode's own DEBUG_NAVIGATE (verbose
+    // navigate/collision logging) -- this one gates a per-tick
+    // replay_frame broadcast for the test-replay recorder instead, so
+    // turning on one doesn't silently turn on the other.
+    private static final boolean RECORD_REPLAY = Boolean.getBoolean("minebot.recordReplay");
+
     // Set at the end of onInitializeClient, once this instance actually
     // exists -- needed so ItemBreakMixin (which has no other way to reach
     // a live MinebotMod instance; mixins target vanilla classes, not this
@@ -308,6 +314,7 @@ public final class MinebotMod implements ClientModInitializer {
         InventoryController.tick(player);
 
         maybeBroadcastPositionEvent(player);
+        maybeBroadcastReplayFrame(player);
         broadcastEntityEvents(player, level);
         inventoryReporter.maybeBroadcast(player.getInventory(), controlClient);
         itemDropTracker.tick(level, controlClient);
@@ -826,6 +833,20 @@ public final class MinebotMod implements ClientModInitializer {
         event.addProperty("yaw", player.getYRot());
         event.addProperty("pitch", player.getXRot());
         event.addProperty("on_ground", player.onGround());
+        controlClient.sendEvent(event.toString());
+    }
+
+    /**
+     * Unlike maybeBroadcastPositionEvent, never dedups -- a replay scrubber
+     * needs exactly one frame per tick for a consistent playback cadence,
+     * even while the bot is standing still. First line is the flag check
+     * so building/serializing a frame costs nothing when not recording.
+     */
+    private void maybeBroadcastReplayFrame(final LocalPlayer player) {
+        if (!RECORD_REPLAY) {
+            return;
+        }
+        JsonObject event = minebot.mod.replay.ReplayFrameBuilder.build(player, legsPathTracker);
         controlClient.sendEvent(event.toString());
     }
 
