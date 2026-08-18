@@ -2,6 +2,8 @@ package minebot.mod.replay;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import minebot.mod.MinebotInput;
+import minebot.mod.MovementIntent;
 import minebot.mod.pathfinding.Move;
 import minebot.mod.pathfinding.PathTracker;
 import net.minecraft.core.BlockPos;
@@ -18,7 +20,7 @@ public final class ReplayFrameBuilder {
     private ReplayFrameBuilder() {
     }
 
-    public static JsonObject build(final LocalPlayer player, final PathTracker pathTracker) {
+    public static JsonObject build(final LocalPlayer player, final PathTracker pathTracker, final MinebotInput input) {
         JsonObject event = new JsonObject();
         event.addProperty("type", "replay_frame");
         event.addProperty("x", player.getX());
@@ -31,6 +33,19 @@ public final class ReplayFrameBuilder {
         event.addProperty("velocity_y", player.getDeltaMovement().y);
         event.addProperty("velocity_z", player.getDeltaMovement().z);
         event.addProperty("sprinting", player.isSprinting());
+
+        // The bot's own decided intent this tick (see MinebotInput.
+        // getLastIntent's own docstring for why this, not keyPresses) --
+        // lets a replay viewer answer "did the bot stop holding forward in
+        // the air" / "how many ticks did it hold jump" directly from the
+        // recording instead of having to infer it from position deltas.
+        MovementIntent intent = input.getLastIntent();
+        event.addProperty("input_forward", intent.forward);
+        event.addProperty("input_backward", intent.backward);
+        event.addProperty("input_left", intent.left);
+        event.addProperty("input_right", intent.right);
+        event.addProperty("input_jump", intent.jump);
+        event.addProperty("input_sprint", intent.sprint);
 
         JsonArray path = new JsonArray();
         for (Move move : pathTracker.waypoints()) {

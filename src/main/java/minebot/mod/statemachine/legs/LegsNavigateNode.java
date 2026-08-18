@@ -605,10 +605,10 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         boolean atLastSafeTick = approachingJump && buildingRunup && !groundAheadOfNextStep;
         JumpPhysics.Plan jumpPlan = null;
         if (approachingJump) {
-            if (runupTicks <= 1 || atLastSafeTick) {
+            if (onGround && (runupTicks <= 1 || atLastSafeTick)) {
                 // Either run-up just started this tick, run-up isn't
                 // currently building (walked off without ever reaching
-                // one -- e.g. mid-air after a failed attempt), or this IS
+                // one -- e.g. stood still after a failed attempt), or this IS
                 // the tick the jump is actually about to fire (the last
                 // tick with real ground still ahead) -- in every one of
                 // these cases the plan must be sized against the bot's
@@ -629,6 +629,27 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
                 // THAT still matters -- an unrelated live bug from
                 // recomputing every single tick, not just the ones that
                 // matter here).
+                //
+                // Gated on onGround (not just runupTicks<=1): buildingRunup
+                // above is ALSO onGround-gated, so runupTicks is forced to
+                // 0 -- and thus runupTicks<=1 is true -- on EVERY airborne
+                // tick following a real jump, not just the ground tick
+                // run-up starts on. Without this guard, JumpPhysics.
+                // planRunup was being called fresh every tick DURING the
+                // jump arc itself, sizing a brand-new "ground run-up"
+                // plan against the bot's already-shrinking (mid-flight)
+                // remaining distance -- confirmed live via goto_jump_4's
+                // own navigate[diag] trace: jumpPlan's landingDistance
+                // dropped from 4.58 to 3.92 to 3.60 ... every single tick
+                // after liftoff, and jumpPlan.sprint() (which walking's
+                // own intent.sprint reads every tick, see below) flapped
+                // along with it -- overwriting the correct liftoff plan
+                // with garbage before the arc it was meant to describe had
+                // even finished, then feeding that same garbage plan into
+                // the NEXT real jump's own hasRunup/atLastSafeTick checks
+                // once the bot landed. Once airborne, the plan committed to
+                // at liftoff is the only one that describes this arc --
+                // always reuse it from the blackboard instead.
                 jumpPlan = JumpPhysics.planRunup(jumpHorizontalDistance);
                 ctx.blackboard.put(JUMP_PLAN, jumpPlan);
             } else {
@@ -675,7 +696,25 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         // toggling creative flight on entirely by accident. A real jump
         // is a single discrete key-down on the ground, held or not; there
         // is nothing for a jump input to do once already airborne.
-        boolean wantsToJump = walking && onGround && (dy > 0.1 || waypointRequiresJump || atLastSafeTick) && !landingOnFarmland && requiresJumpSafeToFire;
+        // dy > 0.1 alone previously ALSO fired jump input, independent of
+        // the move's own requiresJump classification -- a pre-Movements
+        // era heuristic ("the next waypoint is higher, so just try
+        // jumping") that predates getMoveForward/getMoveJumpUp/
+        // getMoveStepUp ever properly classifying which moves need a real
+        // jump. Confirmed live as a real bug once getMoveStepUp started
+        // correctly classifying a stairs no-jump step-up as
+        // requiresJump=false: dy is still > 0.1 for that same step (a
+        // real ~0.5 block rise), so this clause kept firing jump input
+        // anyway, right alongside the correctly-computed false --
+        // harmless in isolation (real vanilla auto-step just silently
+        // absorbed the redundant key press, no visible extra airtime) but
+        // still wrong: a real requiresJump=false move should press NO
+        // jump input at all, not "no input, except when dy also happens
+        // to be large enough." waypointRequiresJump is now the single
+        // authoritative signal every move-generator (getMoveForward/
+        // getMoveJumpUp/getMoveStepUp/getMoveParkourForward) sets
+        // correctly on its own Move.
+        boolean wantsToJump = walking && onGround && (waypointRequiresJump || atLastSafeTick) && !landingOnFarmland && requiresJumpSafeToFire;
         if (wantsToJump) {
             intent.jump = true;
         }
@@ -712,19 +751,38 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
     }
 
     /**
-     * True if the block one tile further in the direction of `dx, dz`
-     * (the walk direction toward the current aim point -- see this
-     * method's own call site) has solid ground under it -- used to detect
-     * "one more step and there's nothing left to stand on" while building
-     * run-up, so a short platform can force the jump to fire on its own
-     * last safe tick instead of letting the bot walk straight off the
-     * edge with no jump input at all (see the SPRINT_RUNUP_TICKS-adjacent
-     * comment at this method's own call site for the live bug this
-     * fixes). Checks the block at foot level one tile ahead, not the
-     * block directly below the player's CURRENT position -- the player
-     * is already standing on solid ground by definition while still
-     * onGround(), so the question that actually matters is whether the
-     * NEXT tile has any.
+     * True if the ground under the player's own LEADING hitbox face (0.3
+     * blocks ahead of center in the direction of travel -- see
+     * JumpPhysics.PLAYER_HALF_WIDTH) still has solid support directly
+     * beneath it -- used to detect "one more step and there's nothing left
+     * to stand on" while building run-up, so a short platform can force
+     * the jump to fire on its own last safe tick instead of letting the
+     * bot walk straight off the edge with no jump input at all (see the
+     * SPRINT_RUNUP_TICKS-adjacent comment at this method's own call site
+     * for the live "does not jump at all" bug this originally fixed).
+     *
+     * Previously checked a flat floor(playerPos + 1-block-unit-vector)
+     * tile -- one full block ahead of the player's CENTER, regardless of
+     * how much real ground was actually still there. Confirmed live as a
+     * real bug on goto_jump_4: at self.z=1.884 (still 1+ block of real
+     * platform left before the true edge at z=3.0), floor(1.884+1)=
+     * floor(2.884)=2 (still solid) so run-up kept building; one tick
+     * later at self.z=2.157, floor(2.157+1)=floor(3.157)=3 (the gap) so
+     * this flipped to false and forced the jump to fire IMMEDIATELY --
+     * at z=2.157, a full ~0.84 blocks before the player's own leading
+     * face (z=2.157+0.3=2.457) would have reached the real edge at
+     * z=3.0, let alone the platform's own last fully-supported tick.
+     * Cutting run-up off this early starved the jump of real approach
+     * distance it should have had, undershooting a gap that real
+     * decompiled physics says should have been an easy clear.
+     *
+     * Checks the block directly under the leading face ITSELF (not a
+     * further block beyond it) -- the leading face is the real point
+     * whose support determines whether the very next tick's forward step
+     * still has anything to land on; looking a further block past that
+     * (as an intermediate version of this fix did) just re-introduces the
+     * same over-eager-by-almost-a-block problem this fix exists to
+     * remove, only shifted by PLAYER_HALF_WIDTH instead of eliminated.
      */
     private static boolean hasGroundOneBlockAhead(final TickContext ctx) {
         NavIntent.Target target = ctx.blackboard.get(NavIntent.NAV_TARGET);
@@ -744,8 +802,16 @@ public final class LegsNavigateNode implements StateNode<LegsState> {
         if (length < 1.0E-6) {
             return true;
         }
-        int aheadX = (int) Math.floor(ctx.player.getX() + dx / length);
-        int aheadZ = (int) Math.floor(ctx.player.getZ() + dz / length);
+        double unitX = dx / length;
+        double unitZ = dz / length;
+        // Leading face of the hitbox, in the direction of travel -- the
+        // real point whose support (or lack of it) determines whether the
+        // next tick can still safely hold forward, not the block-center
+        // position the old flat +1 check used.
+        double leadingX = ctx.player.getX() + unitX * minebot.mod.pathfinding.JumpPhysics.PLAYER_HALF_WIDTH;
+        double leadingZ = ctx.player.getZ() + unitZ * minebot.mod.pathfinding.JumpPhysics.PLAYER_HALF_WIDTH;
+        int aheadX = (int) Math.floor(leadingX);
+        int aheadZ = (int) Math.floor(leadingZ);
         int footY = (int) Math.floor(ctx.player.getY());
         BlockPos below = new BlockPos(aheadX, footY - 1, aheadZ);
         return !ctx.level.getBlockState(below).isAir();

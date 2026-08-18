@@ -422,88 +422,180 @@ to either `conftest.py` or `TestRunner` specifically.
 - Broader test suite scope beyond movement/pathfinding (bow-drawing,
   block breaking, door opening, item pickup) -- not started.
 
-## Handoff: `goto_jump_4` still fails (jump-arc physics incomplete)
+## Debugging a failure: check the replay before investigating code
 
-`goto_jump_4` (an 8-block course, required path checkpoint at z=4, a real
-3-block gap z=3-5 -- see its own registration comment in
-`minebot/testing/tests.py`) still fails as of this writing: the bot
-reliably collides with the landing platform's own wall face (real
-`horizontalCollision=true`, confirmed via a `navigate[collision]` AABB
-trace) instead of clearing onto it, at the same position every run.
+Per explicit direction: when a test fails and a real per-tick replay
+exists (or can be recorded), let the human look at it in
+minebot-frontend's replay viewer BEFORE diving into the mod/backend
+source to diagnose the failure -- a person watching the actual recorded
+trajectory (bot hitbox, real position/velocity per axis, per-tick input
+button state, the schematic's own wool-marker waypoints with their real
+hit-radius, placed-block platforms -- see minebot's own `replay.ts`/
+`ReplayViewer3D.tsx`) routinely spots the real mechanism (e.g. "it's
+walking off the edge, not failing to jump") faster than re-deriving it
+from log traces alone, and can redirect the investigation before time is
+spent chasing the wrong hypothesis.
 
-### Fixes landed this session (keep these -- each independently confirmed
-correct against decompiled vanilla source and/or a real collision trace,
-regardless of whether the remaining bug below ever gets fixed)
+Practical shape: run the failing test with `MINEBOT_DEBUG_NAVIGATE=true`
+(this repo's own `tests/integration/conftest.py` -- ONE flag now drives
+both the replay recording and the verbose navigate[diag]/
+navigate[collision] text log together, since a real debugging session
+always wants both at once -- see that env var's own comment for the live
+bug two separate flags caused: recording without the debug flag produced
+a replay with 0 frames), start/confirm the backend (`./start.sh`,
+`ObserverServer` on `MINEBOT_OBSERVER_PORT`/47894 serves `GET /replays`
+independent of any mod client being connected) and the frontend (`pnpm
+dev` in minebot-frontend, port 5173) are both running, then point the
+human at the replay tab before proposing a fix.
 
-1. **Sprint-jump liftoff boost** (`JumpPhysics.SPRINT_JUMP_LIFTOFF_BOOST
-   = 0.2`) -- `LivingEntity.jumpFromGround`'s own sprint branch adds a
-   flat 0.2 horizontal impulse the instant a sprinting jump leaves the
-   ground (`addDeltaMovement`, facing-direction unit vector * 0.2). The
-   model had no term for this at all before, so it systematically
-   demanded far more run-up than real sprint-jumping needs.
-2. **Sprint airborne acceleration** (`JumpPhysics.AIR_ACCEL_SPRINT =
-   0.026`, vs `AIR_ACCEL_WALK = 0.02`) -- `Player.getFlyingSpeed()`
-   overrides `LivingEntity`'s flat `0.02` airborne-accel constant with
-   `0.026` whenever `isSprinting()` is true (NOT flying -- see its own
-   `abilities.flying` branch, unrelated). The model previously used
-   `0.02` unconditionally.
-3. **Jump-waypoint look-ahead** (`LegsNavigateNode`'s `jumpWaypoint`) --
-   run-up now starts building while still approaching the PLAIN waypoint
-   immediately before a real `requiresJump` waypoint, instead of only
-   after `PathTracker.nextWaypoint` has already advanced onto the jump
-   waypoint itself -- which, for a waypoint sitting flush on a
-   platform's own edge, was always too late to build any run-up at all.
-4. **Live (not frozen-too-early) run-up plan distance** -- `JUMP_PLAN` is
-   now (re)computed against the bot's REAL position at the tick it's
-   actually about to fire (`atLastSafeTick`), not a stale distance
-   measured whenever run-up first started building several ticks (and
-   several blocks of further walking) earlier.
-5. **Ledge-edge height check** (`JumpPhysics.simulateArc`,
-   `MIN_HEIGHT_AT_TARGET`, `PLAYER_HALF_WIDTH`) -- a genuinely new
-   concept the model had no equivalent of before: reject a run-up plan
-   that eventually reaches the target horizontal DISTANCE but has
-   already fallen below the landing ledge's own height by the tick the
-   player's own leading hitbox face (0.3 blocks ahead of center) reaches
-   the ledge's wall -- exactly the real `horizontalCollision` failure
-   mode this whole investigation is chasing, which a same-height
-   "total distance at re-landing" check can never see on its own.
+## Resolved: `goto_jump_4` jump-arc physics (previous handoff, now fixed)
 
-### What's still wrong
+A prior session's handoff here described `goto_jump_4` reliably colliding
+with its landing wall (`horizontalCollision=true`) despite 5 jump-physics
+fixes (sprint-jump liftoff boost, sprint airborne accel, jump-waypoint
+look-ahead, live run-up replanning, ledge-edge height check -- all still
+correct and still in place). The actual root cause turned out to be
+unrelated to `AIR_FRICTION_DECAY`/the velocity model the old handoff
+suspected: **`LegsNavigateNode.hasGroundOneBlockAhead`** checked solid
+ground a full block ahead of the player's own CENTER (not its leading
+hitbox face), which fired `atLastSafeTick` -- and therefore the real
+jump -- up to ~0.85 blocks too early, starving every jump of real run-up
+distance regardless of how accurate the airborne model was. Fixed to
+check the block directly under the leading face itself. A second,
+independent bug (`JUMP_PLAN` being recomputed every airborne tick instead
+of staying frozen from liftoff, since `runupTicks` resets to 0 the moment
+`onGround` goes false) was found and fixed alongside it. `goto_jump_4`
+now passes reliably.
 
-Even with all five fixes above, `goto_jump_4` collides with the landing
-wall at the same spot every time. Real per-tick horizontal position
-(pulled from `navigate[diag]`/`navigate[collision]`'s own broadcast log
-during a run) advances at a near-constant **~0.29 blocks/tick** through
-the jump arc. `JumpPhysics.simulateArc` predicts a rising-then-falling
-curve instead, peaking around **~0.37 blocks/tick** early in the arc and
-decaying from there (`AIR_FRICTION_DECAY = 1.0 * 0.91` per tick). Real
-flight is measurably slower/flatter than the model -- the model's own
-landing-distance number ends up close to correct in some cases (by
-coincidence of where the curve happens to average out) while the
-TIMING of when the bot reaches a given horizontal distance is wrong,
-which is exactly what the ledge-height check (fix 5) depends on being
-right and currently isn't.
+## Handoff: `goto_stairs_1` intermittently fails (real void-world bug, not pathfinding)
 
-This means the remaining bug is in the AIRBORNE velocity/friction model
-itself -- not a missing term the way fixes 1-2 were, but the existing
-`AIR_FRICTION_DECAY` constant (or how ground run-up velocity carries over
-into the airborne phase at the moment of liftoff) being measurably wrong
-against real per-tick behavior.
+`goto_stairs_1` (a 3-step full-height staircase, `oak_stairs` blocks atop
+solid stone risers, `facing=south`, bot climbing south -- see its own
+registration in `minebot/testing/tests.py`) intermittently times out or
+mis-plans. Real root cause, confirmed via `AStar`'s own diagnostic
+instrumentation during this investigation (since removed -- see below for
+how to re-add it): **the disposable test world's own "void" floor is not
+actually void one block below the schematic's intended floor layer.**
 
-**Concrete next step, not yet done:** add real per-tick
-`ctx.player.getDeltaMovement()` (both `.x`/`.z`, not just position) to
-the `navigate[diag]`/`navigate[collision]` log during a jump arc, and
-diff that tick-by-tick against `simulateArc`'s own internal `v` value at
-the matching tick -- direct velocity-vs-velocity comparison, rather than
-inferring velocity from position deltas the way this session's
-diagnosis had to (position deltas conflate velocity AND however many
-real ticks actually elapsed between two logged broadcasts, which this
-session never independently confirmed against `ctx.player.tickCount`).
+### What's confirmed
 
-The mod jar currently deployed to the `ritebot` Prism instance has fix 5
-applied but is still the failing build (`goto_jump_4` fails both via
-`!runtest` against a real client and via `uv run pytest
-tests/integration/test_goto_jump_4.py`). All five fixes above are left
-in the working tree uncommitted, on top of the jump-waypoint look-ahead
-and unconditional `approachingJump` diagnostic logging also added this
-session (see "Live navigate debugging" above).
+- Querying real blocks in the running world: `minecraft:stone` exists at
+  every `(x, y=-61, z)` sampled, including far from the schematic
+  (e.g. near `HOLDING` at `x=-7,z=-6`) -- this isn't schematic-placement
+  bleed, it's a property of the generated world itself.
+- `TestWorldBootstrap.createVoidWorldDimensions` reads `THE_VOID`
+  preset's settings correctly (`voidSettings.getLayersInfo()` prints
+  `[minecraft:air]`, confirmed via direct logging) and constructs a
+  genuinely different `FlatLevelSource` instance via
+  `WorldDimensions.replaceOverworldGenerator` (confirmed via object
+  identity logging: a different `FlatLevelSource@...` before vs after the
+  replace). The correct object is still what gets returned from the
+  `Function<HolderLookup.Provider, WorldDimensions>` supplier passed into
+  `WorldOpenFlows.createFreshLevel`.
+- Despite that, the LIVE world still generates the default flat preset's
+  real stone/dirt layers one block below the intended void floor. The
+  substitution is lost somewhere inside `createFreshLevel`'s own internal
+  dimension-baking/world-creation plumbing -- not reachable to inspect
+  further without decompiled source (bytecode-only access here; a
+  research pass also couldn't pin the exact internal mechanism with
+  confidence).
+- This phantom floor is NOT what makes A* prefer a detour over the real
+  stairs route -- a person correctly pointed out the detour is a genuine
+  dead end (nothing at y=-61 connects upward toward the goal without
+  passing back through the stairs) and a correct search should just
+  backtrack. What actually happens: the phantom floor multiplies the
+  branching factor at every explored node (4-8 viable directions off the
+  1-wide stairs column, vs 1-2 on it), so the search's 40ms per-tick
+  budget (`PathTracker.PATHFINDING_TIMEOUT_MILLIS`'s own tick slice) gets
+  consumed disproportionately exploring the larger, ultimately-dead-end
+  flat region before it can also finish the short real stairs climb --
+  confirmed with real numbers via a temporary `AStar` closed-node counter
+  split by `x==1` (on the stairs column) vs off it: the first search
+  closed only 11-38 total nodes before bailing out `PARTIAL`, and
+  80-95% of those were off-column.
+- A red herring ruled out during this investigation: an early "only 11
+  nodes but still 40ms" measurement looked like a per-node performance
+  bug, but that was entirely a side effect of a temporary diagnostic
+  `LOGGER.info` call left inside `getBlock` itself (logging is
+  expensive per-call at this frequency) -- with it removed, `getBlock`
+  runs at ~0.3 microseconds/call and the search closes 500+ nodes in the
+  same budget, still dominated by the off-column branching factor.
+
+### What's NOT the bug (real, independently-confirmed fixes, keep these)
+
+Three genuine bugs were found and fixed while chasing this, unrelated to
+the void-floor issue and confirmed correct on their own:
+
+1. **No real move type existed for a no-jump stairs step-up**
+   (`Movements.getMoveStepUp`, new) -- every grid-Y-up move previously
+   fell through to `getMoveJumpUp` unconditionally, regardless of whether
+   the real height difference (via a stairs block's own `BlockInfo.
+   height()`, already correctly modeling its lowered y+0.5 top surface)
+   was small enough for real vanilla auto-step to handle with zero jump
+   input. Facing-aware: only succeeds when the stairs block's own real
+   `StairBlock.FACING` matches the bot's direction of travel (walking
+   INTO the low/open step side) -- approaching from the solid riser side
+   correctly still falls through to a real `getMoveJumpUp`. Two
+   sub-bugs found and fixed while building this: the facing comparison
+   was initially backwards (fixed to same-direction, not opposite, after
+   real per-tick replay data disproved the first version), and the
+   landing block itself was incorrectly passed through `safeOrBreak`
+   (which expects a passable/air cell, not a solid landing surface --
+   rejected every real stairs block outright until removed).
+2. **`wantsToJump`'s stale `dy > 0.1` fallback** (`LegsNavigateNode`) --
+   independently fired jump input any time the next waypoint was more
+   than 0.1 blocks higher, regardless of the move's own `requiresJump`
+   classification -- a pre-`Movements`-era heuristic that predates real
+   move classification. Once `getMoveStepUp` started correctly producing
+   `requiresJump=false` for a real no-jump step, this clause still fired
+   jump input right alongside it (harmless in isolation -- vanilla's own
+   auto-step silently absorbed the redundant press -- but wrong).
+   Removed; `waypointRequiresJump` (the move's own real classification)
+   is now the single authoritative signal.
+3. **`litematic.py` discarded blockstate properties entirely** -- only a
+   palette entry's `Name` was ever read, never its `Properties` compound,
+   so `/fill` always placed every block (stairs included) in its bare
+   registry-default orientation regardless of what was actually built in
+   Litematica. Fixed: `SchematicBlock` now carries a `properties` dict
+   and a `blockstate_command_suffix()` method; `place_schematic`'s
+   `_fill_runs` keys a run by `(block, properties)` together (an oriented
+   block never silently merges across a facing change) and emits the
+   real `/fill ... block[key=value,...]` syntax.
+
+### Re-adding the diagnostics if picking this up again
+
+All temporary instrumentation used to reach the diagnosis above was
+removed after confirming the finding (kept the codebase clean rather than
+leaving dead diagnostic code behind) -- to reproduce:
+
+- `AStar.compute()`: log `closedDataSet.size()`/`openHeap.size()`/
+  `bestNode.data` on the `PARTIAL` bailout branch, plus a counter split
+  by whatever column/region is relevant to the scenario under test.
+- `Movements.getBlock`/`getNeighbors`: wrap with `System.nanoTime()`
+  before/after and accumulate into static counters, logged once per
+  `PathTracker.maybeReplan` call (after `astar.compute()` returns) --
+  confirms real per-call cost isn't the bottleneck before assuming search
+  breadth is.
+- `TestWorldBootstrap.createVoidWorldDimensions`: log
+  `voidSettings.getLayersInfo()`, and both `flatDimensions.overworld()`
+  (before replace) vs `voidDimensions.overworld()` (after replace) by
+  object identity, to confirm the substitution itself is correct up to
+  the point it's handed to `createFreshLevel`.
+
+### Concrete next steps, not yet done
+
+- Confirm exactly where inside `WorldOpenFlows.createFreshLevel` the
+  substituted `WorldDimensions` gets discarded -- needs real decompiled
+  source (this session only had bytecode/`javap` access) or an
+  interactive comparison against the real GUI flow
+  (`CreateWorldScreen`/`WorldCreationContext`, which is known to work
+  correctly in normal play) to see what it does differently.
+- Once the real void-world bug is fixed, re-run `goto_stairs_1` --
+  expected to pass reliably on the first search once `getMoveDiagonal`'s
+  DROP branch and `getMoveDropDown`'s `getLandingBlock` scan both
+  correctly find no floor off the stairs column at all.
+- A pragmatic workaround exists if the engine bug proves hard to pin down
+  further: `/fill air replace` a generous region below/around each
+  schematic's own anchor as part of `place_schematic`'s setup, clearing
+  any phantom floor regardless of root cause -- not yet implemented, per
+  explicit direction to keep chasing the real bug first.

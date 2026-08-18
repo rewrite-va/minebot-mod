@@ -43,6 +43,22 @@ public final class MinebotInput extends ClientInput {
         this.intent = intent;
     }
 
+    /**
+     * The bot's own most-recently-set intent, independent of whether a
+     * human's real key presses actually won out this tick (see tick()'s
+     * own humanIsPressingSomething branch) -- for diagnostics/replay
+     * recording that wants "what did the bot itself decide to press",
+     * not "what keyPresses ended up driving the player" (which tick()
+     * already exposes via the inherited ClientInput.keyPresses field, but
+     * is only ever populated by tick(), which fires on vanilla's own
+     * player-tick schedule, not synchronously with setIntent() -- reading
+     * THIS instead of keyPresses right after legsStateMachine.tick() avoids
+     * depending on that ordering).
+     */
+    public MovementIntent getLastIntent() {
+        return intent;
+    }
+
     @Override
     public void tick() {
         keyboard.tick();

@@ -110,7 +110,7 @@ public final class JumpPhysics {
     // let the first version of this height check pass every candidate
     // with no effect at all, since by the waypoint's own center the arc
     // had always already fallen well below ledge height regardless.
-    private static final double PLAYER_HALF_WIDTH = 0.3;
+    public static final double PLAYER_HALF_WIDTH = 0.3;
 
     private JumpPhysics() {
     }

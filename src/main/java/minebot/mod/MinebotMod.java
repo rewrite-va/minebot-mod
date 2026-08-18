@@ -314,7 +314,7 @@ public final class MinebotMod implements ClientModInitializer {
         InventoryController.tick(player);
 
         maybeBroadcastPositionEvent(player);
-        maybeBroadcastReplayFrame(player);
+        maybeBroadcastReplayFrame(player, minebotInput);
         broadcastEntityEvents(player, level);
         inventoryReporter.maybeBroadcast(player.getInventory(), controlClient);
         itemDropTracker.tick(level, controlClient);
@@ -842,11 +842,11 @@ public final class MinebotMod implements ClientModInitializer {
      * even while the bot is standing still. First line is the flag check
      * so building/serializing a frame costs nothing when not recording.
      */
-    private void maybeBroadcastReplayFrame(final LocalPlayer player) {
+    private void maybeBroadcastReplayFrame(final LocalPlayer player, final MinebotInput input) {
         if (!RECORD_REPLAY) {
             return;
         }
-        JsonObject event = minebot.mod.replay.ReplayFrameBuilder.build(player, legsPathTracker);
+        JsonObject event = minebot.mod.replay.ReplayFrameBuilder.build(player, legsPathTracker, input);
         controlClient.sendEvent(event.toString());
     }
 

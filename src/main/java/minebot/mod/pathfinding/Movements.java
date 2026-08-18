@@ -4,6 +4,7 @@ import minebot.mod.MinebotMod;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.EmptyBlockGetter;
@@ -11,7 +12,9 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.SnowLayerBlock;
+import net.minecraft.world.level.block.StairBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.Half;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
@@ -177,7 +180,7 @@ public final class Movements {
         BlockPos pos = new BlockPos(x, y, z);
 
         if (!level.isLoaded(pos)) {
-            return new BlockInfo(x, y, z, false, false, false, false, false, false, false, false, false);
+            return new BlockInfo(x, y, z, false, false, false, false, false, false, false, false, false, null);
         }
 
         BlockState state = level.getBlockState(pos);
@@ -235,6 +238,17 @@ public final class Movements {
         // was actually fine) rather than wrong in the unsafe direction
         // (never reports a taller usable surface than reality).
         boolean hasLoweredTopSurface = !isFullBlock && (isStairs || isSlab);
+        // Only meaningful for a BOTTOM-half stairs block -- a top-half
+        // stairs' real top surface is already a flat y+1.0 (see
+        // hasLoweredTopSurface's own comment), so there's no low-step
+        // side to walk onto without jumping either way; leaving
+        // stairsFacing null for that case correctly falls through to the
+        // ordinary full-height-step jump-up path everywhere it's read.
+        Direction stairsFacing = null;
+        if (isStairs && state.hasProperty(StairBlock.FACING) && state.hasProperty(StairBlock.HALF)
+                && state.getValue(StairBlock.HALF) == Half.BOTTOM) {
+            stairsFacing = state.getValue(StairBlock.FACING);
+        }
 
         // A door -- open or closed -- is never air (state.isAir() is false
         // either way, it's still a DoorBlock), but an *open* door is just
@@ -312,7 +326,7 @@ public final class Movements {
         boolean safe = (isAir || isLadder || isLiquid || isDoor || isWalkableSnow || hasNoCollision)
             && !(avoidLiquid && isLiquid) && !isDangerous;
 
-        return new BlockInfo(x, y, z, true, safe, isSolid, isLiquid, isLadder, isDoor, closedDoor, hasLoweredTopSurface, isDangerous);
+        return new BlockInfo(x, y, z, true, safe, isSolid, isLiquid, isLadder, isDoor, closedDoor, hasLoweredTopSurface, isDangerous, stairsFacing);
     }
 
     private BlockInfo getBlock(final BlockInfo origin, final int dx, final int dy, final int dz) {
@@ -569,6 +583,138 @@ public final class Movements {
         return new Move(blockC.x, blockC.y, blockC.z, cost, toBreak, false, digStanceFor(node, toBreak));
     }
 
+    // (dx, dz) -> the real Direction of travel that offset represents,
+    // matching CARDINAL_DIRECTIONS' own {-1,0}/{1,0}/{0,-1}/{0,1}
+    // convention (-x=WEST, +x=EAST, -z=NORTH, +z=SOUTH) -- needed to
+    // compare a stairs block's own real StairBlock.FACING against which
+    // way the bot is actually walking through it (see getMoveStepUp's own
+    // docstring). Diagonal (dx!=0 AND dz!=0) callers never legitimately
+    // reach this -- getMoveStepUp/getMoveJumpUp are only ever called with
+    // one axis zero (see CARDINAL_DIRECTIONS' own 4 entries) -- so this
+    // only needs to resolve the 4 cardinal cases.
+    private static Direction cardinalDirection(final int dx, final int dz) {
+        if (dx < 0) return Direction.WEST;
+        if (dx > 0) return Direction.EAST;
+        if (dz < 0) return Direction.NORTH;
+        return Direction.SOUTH;
+    }
+
+    /**
+     * A real vanilla no-jump step-up: walking toward a BOTTOM-half stairs
+     * block one grid-Y above the bot's own current standing block, from
+     * the side its low/open step faces TOWARD the bot -- i.e. the bot's
+     * direction of travel matches the stairs' own StairBlock.FACING
+     * (walking IN the direction the block's low-step side opens toward,
+     * not against its solid riser face). Real vanilla auto-step handles
+     * this (~0.5 blocks) automatically, no jump key needed, the same way
+     * stepping onto a half-slab or climbing a real staircase one tread at
+     * a time never requires jumping in normal play.
+     *
+     * Per explicit direction: a stairs block's own facing alone doesn't
+     * determine whether a step onto it needs a jump -- it depends on
+     * BOTH the block's facing AND which direction the bot is walking
+     * through it. A block whose FACING points AWAY from the bot's own
+     * travel direction presents its solid riser to an approaching bot --
+     * that's a genuine full-height wall this move must refuse, falling
+     * through to getMoveJumpUp's real jump instead. Confirmed live on
+     * goto_stairs_1's own 3-step staircase (every riser facing=south,
+     * bot walking south/+z, i.e. SAME direction as FACING): an initial
+     * version of this check compared against getOpposite() instead,
+     * which real per-tick replay data disproved directly -- with dy>0.1's
+     * own independent jump trigger removed (see wantsToJump's own
+     * comment), the getOpposite() version left every one of these 3
+     * genuinely-walkable steps still requiresJump=true, while the
+     * corrected same-direction comparison here (validated by rerunning
+     * against the exact same schematic) is what actually matches the
+     * observed "only the FIRST step area shows a real airborne cycle,
+     * the rest are absorbed by vanilla's own auto-step silently" result.
+     *
+     * Also confirmed the "no move type previously existed for a small
+     * real step-up" root cause itself: before this method existed at
+     * all, every grid-Y-up move fell through to getMoveJumpUp
+     * unconditionally, regardless of the real (stairs-aware) height
+     * difference.
+     *
+     * Tried by getNeighbors BEFORE getMoveJumpUp for the same direction
+     * (see its own call site) -- when this returns non-null, no separate
+     * getMoveJumpUp neighbor is generated for the SAME direction, so the
+     * search only ever sees ONE correctly-classified move per direction
+     * here, not both a real move and a spurious duplicate.
+     *
+     * getBlock(node, dx, 0, dz) is the only candidate tread position ever
+     * checked -- this relies on `node`'s own y always being body-space
+     * (feet-level, with the actual floor/tread one grid-Y below it), the
+     * same invariant every other move type's own block0 = getBlock(node,
+     * 0, -1, 0) baseline assumes. This method's own produced Move MUST
+     * therefore store the body-space cell above its landing tread
+     * (blockB), never the tread block itself (blockC) -- see the Move
+     * construction below for the real goto_stairs_1 bug this was
+     * confirmed live to cause when it stored blockC directly: node.y
+     * became the tread's own grid-Y instead of body-space, which only
+     * coincidentally matched body-space for the very FIRST step (floor to
+     * tread 1) and was off-by-one for every tread-to-tread step after,
+     * making this same-Y lookup wrongly miss every subsequent real tread
+     * and fall through to getMoveJumpUp instead.
+     */
+    public Move getMoveStepUp(final Move node, final int dx, final int dz) {
+        BlockInfo blockB = getBlock(node, dx, 1, dz);
+        BlockInfo blockC = getBlock(node, dx, 0, dz);
+
+        if (blockC.stairsFacing == null) {
+            return null; // not a bottom-half stairs block at all -- no-jump step-up doesn't apply
+        }
+        if (blockC.stairsFacing != cardinalDirection(dx, dz)) {
+            return null; // facing away from travel direction -- the solid riser faces the bot, a real jump is needed
+        }
+        if (blockC.dangerous) {
+            return null; // real floor, but standing on it (magma block) hurts -- see getLandingBlock's own dangerous check
+        }
+
+        BlockInfo block0 = getBlock(node, 0, -1, 0);
+        double stepHeight = blockC.height() - block0.height();
+        if (stepHeight > MAX_STEP_HEIGHT) {
+            return null; // shouldn't happen for a real stairs block's own 0.5 rise, but stay consistent with every other step-height gate
+        }
+
+        // blockC itself is the STAIRS BLOCK the bot lands standing ON --
+        // its own real top surface (already validated as stairsFacing !=
+        // null, i.e. a real bottom-half stairs) -- never passed through
+        // safeOrBreak the way getMoveForward's own same-named blockC is
+        // (that one is the FEET-level space one grid-Y below its own
+        // landing floor, which genuinely does need to be safe/passable).
+        // Confirmed live as a real bug in an earlier version of this
+        // method: calling safeOrBreak(node, blockC, ...) here asked "is
+        // this solid stairs block safe to walk THROUGH", which a solid
+        // block obviously fails (cost=101.0, BLOCKED), rejecting every
+        // single real stairs step-up even after the facing check
+        // correctly passed -- the landing surface only needs blockB (the
+        // headroom cell directly above it) to be clear, not blockC itself
+        // to be air.
+        double cost = 1.0; // plain walk cost -- no jump-move surcharge, this is real vanilla auto-step
+        List<BlockPos> toBreak = new ArrayList<>();
+        cost += safeOrBreak(node, blockB, toBreak);
+        if (cost > BLOCKED) return null;
+
+        // Produced Move stores blockB (the body-space cell above the
+        // tread), NOT blockC (the solid tread itself) -- matching every
+        // other move type's own convention that a produced node's y is
+        // body-space/feet-level, with the floor/tread one grid-Y below it
+        // (see getMoveForward/getMoveJumpUp, which both store the
+        // body-space cell above their own landing floor the same way).
+        // Confirmed live as the REAL goto_stairs_1 root cause: an earlier
+        // version stored blockC (the tread) directly, which broke that
+        // invariant for every node produced by THIS method specifically
+        // -- every other function's own block0 = getBlock(node, 0, -1, 0)
+        // assumes node.y is body-space with the floor one below, so a
+        // step-up node whose y was instead the tread's OWN grid-Y (only
+        // numerically identical to body-space on the very first step, off
+        // by one on every step after) fed a wrong stepHeight baseline
+        // into every subsequent move computed from it, which cascaded
+        // into wrongly falling through to getMoveJumpUp for every step
+        // past the first.
+        return new Move(blockB.x, blockB.y, blockB.z, cost, toBreak, false, digStanceFor(node, toBreak));
+    }
+
     public Move getMoveJumpUp(final Move node, final int dx, final int dz) {
         BlockInfo blockA = getBlock(node, 0, 2, 0);
         BlockInfo blockH = getBlock(node, dx, 2, dz);
@@ -751,6 +897,8 @@ public final class Movements {
             if (blockE.physical && blockE.dangerous) {
                 return null; // real floor, but standing on it (magma block) hurts -- see getLandingBlock's own dangerous check
             }
+            MinebotMod.LOGGER.info("getMoveDiagonal[diag2]: DROP branch fired from node={} dx={} dz={} blockD=({},{},{},physical={},known={}) blockE=({},{},{},physical={},known={})",
+                node, dx, dz, blockD.x, blockD.y, blockD.z, blockD.physical, blockD.known, blockE.x, blockE.y, blockE.z, blockE.physical, blockE.known);
             return new Move(blockC.x, blockC.y - 1, blockC.z, cost, toBreak, false, digStanceFor(node, toBreak));
         }
         return null;
@@ -957,8 +1105,22 @@ public final class Movements {
         for (int[] dir : CARDINAL_DIRECTIONS) {
             Move forward = getMoveForward(node, dir[0], dir[1]);
             if (forward != null) neighbors.add(forward);
-            Move jumpUp = getMoveJumpUp(node, dir[0], dir[1]);
-            if (jumpUp != null) neighbors.add(jumpUp);
+            // Tried BEFORE getMoveJumpUp for this same direction -- a
+            // stairs block approached from its own low/open side needs no
+            // jump at all (see getMoveStepUp's own docstring), so when it
+            // succeeds, getMoveJumpUp for the SAME (dx, dz) is skipped
+            // entirely rather than adding both: they'd otherwise offer
+            // the search two different-cost moves landing on the exact
+            // same destination cell, one correctly requiresJump=false and
+            // one wrongly requiresJump=true, for what is really one real
+            // move.
+            Move stepUp = getMoveStepUp(node, dir[0], dir[1]);
+            if (stepUp != null) {
+                neighbors.add(stepUp);
+            } else {
+                Move jumpUp = getMoveJumpUp(node, dir[0], dir[1]);
+                if (jumpUp != null) neighbors.add(jumpUp);
+            }
             Move dropDown = getMoveDropDown(node, dir[0], dir[1]);
             if (dropDown != null) neighbors.add(dropDown);
             if (allowParkour) {
@@ -968,7 +1130,9 @@ public final class Movements {
 
         for (int[] dir : DIAGONAL_DIRECTIONS) {
             Move diagonal = getMoveDiagonal(node, dir[0], dir[1]);
-            if (diagonal != null) neighbors.add(diagonal);
+            if (diagonal != null) {
+                neighbors.add(diagonal);
+            }
         }
 
         Move down = getMoveDown(node);

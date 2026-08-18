@@ -1,5 +1,7 @@
 package minebot.mod.pathfinding;
 
+import net.minecraft.core.Direction;
+
 /**
  * A single queried block's pathfinding-relevant classification -- mirrors
  * minebot's earlier Python pathfinding port (pure-protocol-backend
@@ -21,6 +23,22 @@ public final class BlockInfo {
     public final boolean door; // a hand-openable door, open or closed
     public final boolean closedDoor; // a hand-openable door currently blocking this space
     public final boolean stairsOrSlab; // walkable like a full block, but its real top surface can sit up to 0.5 lower -- see height()'s own docstring
+    // Non-null ONLY for a bottom-half stairs block (never top-half slabs,
+    // double slabs, or non-stairs blocks) -- the real StairBlock.FACING
+    // property, i.e. which way the block's own low/open step opens
+    // toward. A player walking IN the direction FACING points (i.e.
+    // walking toward the block from the side its low step opens onto)
+    // steps onto the real y+0.5 low half with zero jump input needed --
+    // real vanilla auto-step handles a rise this small automatically, the
+    // same as stepping onto a half-slab or a single stair tread in real
+    // play. Approaching from the OTHER side (walking in the OPPOSITE
+    // direction FACING points, into the block's solid riser face) is a
+    // genuine full-height wall needing a real jump -- confirmed live per
+    // explicit direction: a naive "stairs always means no jump" rule is
+    // wrong exactly half the time, since which side is climbable depends
+    // on both the block's own facing AND
+    // which direction the bot is actually walking through it.
+    public final Direction stairsFacing;
     // A block that hurts the player just by touching/standing on it --
     // lava, magma block -- as opposed to merely being a solid obstacle.
     // Kept distinct from `safe`/`physical` rather than folded into
@@ -36,7 +54,7 @@ public final class BlockInfo {
     public BlockInfo(
         final int x, final int y, final int z, final boolean known, final boolean safe,
         final boolean physical, final boolean liquid, final boolean climbable, final boolean door, final boolean closedDoor,
-        final boolean stairsOrSlab, final boolean dangerous
+        final boolean stairsOrSlab, final boolean dangerous, final Direction stairsFacing
     ) {
         this.x = x;
         this.y = y;
@@ -50,6 +68,7 @@ public final class BlockInfo {
         this.closedDoor = closedDoor;
         this.stairsOrSlab = stairsOrSlab;
         this.dangerous = dangerous;
+        this.stairsFacing = stairsFacing;
     }
 
     /**
