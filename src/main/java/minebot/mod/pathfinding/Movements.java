@@ -57,14 +57,26 @@ import java.util.List;
  *
  * Water is walkable by default -- real vanilla liquids have no collision
  * box, so a liquid tile counts as `safe` the same as air, just with a
- * small +1.0 liquidCost nudge per move (getMoveForward/getMoveDiagonal)
- * discouraging it without forbidding it, so A* still crosses a
- * stream/pond when that's genuinely the shortest route. avoidLiquid
+ * cost nudge per move into it (getMoveForward/getMoveDiagonal, checked
+ * against the *destination* tile) discouraging it without forbidding it,
+ * so A* still crosses a stream/pond when that's genuinely the shortest
+ * route by far, but strongly prefers any comparable dry detour.
+ * (Previously this checked the bot's own current tile instead of the
+ * destination, and used a flat +1.0 -- both meant entering water from dry
+ * land was effectively free, and the bot routed straight through ponds it
+ * should have walked around.) The nudge itself has two tiers: a
+ * fully-submerged tile (the space directly above it is liquid too) pays
+ * the full LIQUID_COST, while a surface tile (open/non-liquid space
+ * above, so the bot's head stays above water) pays the much cheaper
+ * LIQUID_SURFACE_COST -- per explicit direction, this keeps the bot
+ * choosing to stay afloat (able to breathe/see) rather than treating a
+ * shallow pond crossing the same as ducking fully underwater. avoidLiquid
  * (false by default) overrides this per-instance: with it set, liquid
  * tiles are `!safe` instead, which safeOrBreak turns into a hard BLOCKED
- * for every move type at once (not just the two that add liquidCost) --
- * see avoidLiquid's own field docstring for why (Legs:FLEE routing INTO
- * water while retreating is worse than a longer dry detour).
+ * for every move type at once (not just the two that add these liquid
+ * cost nudges) -- see avoidLiquid's own field docstring for why
+ * (Legs:FLEE routing INTO water while retreating is worse than a longer
+ * dry detour).
  *
  * Lava is the one liquid this doesn't apply to -- per explicit
  * direction, it's never merely discouraged the way water is:
@@ -134,6 +146,28 @@ public final class Movements {
     private static final double JUMP_HEIGHT_COMFORTABLE = 1.0; // a plain 1-block step-up -- no penalty up to here
     private static final double JUMP_HEIGHT_PENALTY_MAX = 6.0; // cost added at a jump right at MAX_STEP_HEIGHT itself
     private static final double DIG_COST = 1.0; // movements.js's default Movements#digCost
+    // High rather than the old flat +1.0: that nudge was too weak in
+    // practice -- A* kept routing straight through ponds/streams even
+    // when a short dry detour existed, since 1.0 is the same as a single
+    // extra walk step. This is high enough to force A* to prefer any dry
+    // route unless the water crossing saves several blocks over the
+    // detour, while still not being BLOCKED (a stream that's genuinely
+    // the only way through, or the shortest route by far, stays crossable
+    // -- see avoidLiquid for the separate hard-block override).
+    private static final double LIQUID_COST = 10.0;
+    // Charged instead of LIQUID_COST when the space directly above the
+    // water tile is open (not itself liquid) -- the bot's body still
+    // occupies that head-space above its feet, so this is genuine surface
+    // water the bot floats at rather than a fully submerged tile it'd
+    // have to dive through. Per explicit direction: surface water should
+    // stay meaningfully cheaper than a real underwater crossing so A*
+    // keeps the bot afloat (able to breathe/see) when it does decide
+    // water is worth crossing, rather than treating a shallow pond
+    // surface the same as a deep underwater tunnel. Still above plain
+    // walk cost (1.0) -- surface water is slower to move through and
+    // still worth a dry detour when one is cheap, just not as strongly
+    // discouraged as going fully underwater.
+    private static final double LIQUID_SURFACE_COST = 3.0;
     // movements.js's default Movements#maxDropDown -- caps how far below the
     // current node getMoveDown/getMoveDropDown are allowed to land. Missing
     // entirely from this port until found live: without it, getLandingBlock
@@ -158,12 +192,12 @@ public final class Movements {
     public boolean allowSprinting = true;
     public boolean allowDig = true;
     // False routes water/lava out of the search entirely (BLOCKED, not
-    // just the usual +1.0 liquidCost nudge) -- per explicit direction,
+    // just the usual LIQUID_COST nudge) -- per explicit direction,
     // Legs:FLEE shouldn't path INTO water while retreating from a threat
     // (a bot mid-flee slowed/trapped in water is worse off than one that
     // took a slightly longer dry route). Every other caller keeps liquid
     // as a merely-discouraged, still-legal move (see getMoveForward/
-    // getMoveDiagonal's own liquidCost) -- ordinary navigation/kiting/etc.
+    // getMoveDiagonal's own LIQUID_COST) -- ordinary navigation/kiting/etc.
     // may still need to cross a stream or pond when that's genuinely the
     // only route.
     public boolean avoidLiquid = false;
@@ -191,7 +225,7 @@ public final class Movements {
         // Lava is a real liquid (getFluidState() is non-empty, same as
         // water) but, unlike water, touching it is lethal -- per explicit
         // direction, never treat it as merely "discouraged" the way
-        // water's own +1.0 liquidCost nudge does (see class docstring on
+        // water's own LIQUID_COST nudge does (see class docstring on
         // avoidLiquid). Checked via the fluid state's own tag rather than
         // BlockTags.LAVA (a block tag), since a flowing-lava tile's block
         // is still Blocks.LAVA either way here -- FluidTags mirrors this
@@ -277,7 +311,7 @@ public final class Movements {
         // avoidLiquid overrides this to false -- see its own docstring;
         // routes liquid out of the search as BLOCKED everywhere `safe`
         // feeds into safeOrBreak (every move type), not just the
-        // separate +1.0 liquidCost nudge getMoveForward/getMoveDiagonal
+        // separate LIQUID_COST nudge getMoveForward/getMoveDiagonal
         // already apply when it's merely discouraged, not disallowed.
         //
         // movements.js's own `carpet` case (a thin, walk-through decorative
@@ -576,8 +610,8 @@ public final class Movements {
         cost += safeOrBreak(node, blockC, toBreak);
         if (cost > BLOCKED) return null;
 
-        if (getBlock(node, 0, 0, 0).liquid) {
-            cost += 1.0; // liquidCost
+        if (blockC.liquid) {
+            cost += blockB.liquid ? LIQUID_COST : LIQUID_SURFACE_COST;
         }
 
         return new Move(blockC.x, blockC.y, blockC.z, cost, toBreak, false, digStanceFor(node, toBreak));
@@ -829,13 +863,15 @@ public final class Movements {
         }
         if (cost > BLOCKED) return null;
 
-        cost += safeOrBreak(node, getBlock(node, dx, y, dz), toBreak);
+        BlockInfo blockLanding = getBlock(node, dx, y, dz);
+        cost += safeOrBreak(node, blockLanding, toBreak);
         if (cost > BLOCKED) return null;
-        cost += safeOrBreak(node, getBlock(node, dx, y + 1, dz), toBreak);
+        BlockInfo blockLandingHead = getBlock(node, dx, y + 1, dz);
+        cost += safeOrBreak(node, blockLandingHead, toBreak);
         if (cost > BLOCKED) return null;
 
-        if (getBlock(node, 0, 0, 0).liquid) {
-            cost += 1.0; // liquidCost
+        if (blockLanding.liquid) {
+            cost += blockLandingHead.liquid ? LIQUID_COST : LIQUID_SURFACE_COST;
         }
 
         BlockInfo blockD = getBlock(node, dx, -1, dz);
